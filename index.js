@@ -1309,6 +1309,15 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
         return;
     }
 
+    // Discord requires an interaction response within about 3 seconds.
+    // Fetching the complete guild member list can take longer, so acknowledge
+    // the interaction before doing any network/database work.
+    if (interaction.isButton()) {
+        await interaction.deferUpdate();
+    } else {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    }
+
     const members = await getRosterMembers(roleId);
     const filteredMembers = filterRosterMembers(members, filter);
     const page = getPage(filteredMembers, pageNumber, PAGE_SIZE);
@@ -1338,12 +1347,9 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
     };
 
     if (interaction.isButton()) {
-        await interaction.update(payload);
+        await interaction.editReply(payload);
     } else {
-        await interaction.reply({
-            ...payload,
-            flags: MessageFlags.Ephemeral
-        });
+        await interaction.editReply(payload);
     }
 }
 

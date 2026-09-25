@@ -637,15 +637,31 @@ function scheduleRelayPublish() {
 // ROSTER FORMATTING
 // ============================================================
 
-async function getRosterMembers(roleId, forceRefresh = false) {
-    // Roster buttons should NEVER trigger a fresh Gateway member fetch.
-    // Discord can rate-limit repeated guild.members.fetch() calls, which
-    // causes the button interaction to appear to hang or fail. The bot has
-    // the GuildMembers intent, so use the populated cache for button clicks.
-    const snapshot = await fetchGuildMembers({ force: forceRefresh });
+function getRosterMembersFromCache(roleId) {
+    const guild = client.guilds.cache.get(config.guildId);
+
+    if (!guild) {
+        throw new Error(
+            `Guild ${config.guildId} was not found in the bot's cached guilds.`
+        );
+    }
+
+    return Array.from(guild.members.cache.values())
+        .filter(member => member.roles.cache.has(roleId))
+        .sort((a, b) =>
+            a.user.username.localeCompare(
+                b.user.username,
+                undefined,
+                { sensitivity: 'base' }
+            )
+        );
+}
+
+async function getFreshRosterMembers(roleId) {
+    const snapshot = await fetchGuildMembers({ force: true });
 
     if (!snapshot.complete) {
-        throw new Error(`Discord member snapshot is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}).`);
+        throw new Error('Discord member snapshot is incomplete.');
     }
 
     return Array.from(snapshot.members.values())
@@ -695,12 +711,12 @@ function rosterFilterRow(prefix, filter) {
 function rosterPaginationRow(prefix, filter, page, totalPages) {
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-            .setCustomId(`${prefix}:prev:${filter}:${page}`)
+            .setCustomId(`${prefix}:page:${filter}:${Math.max(0, page - 1)}`)
             .setLabel('Previous')
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(page <= 0),
         new ButtonBuilder()
-            .setCustomId(`${prefix}:next:${filter}:${page}`)
+            .setCustomId(`${prefix}:page:${filter}:${Math.min(totalPages - 1, page + 1)}`)
             .setLabel('Next')
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(page >= totalPages - 1)
@@ -720,20 +736,131 @@ function formatRosterLines(members, offset = 0) {
         }
 
         const steamUrl = `https://steamcommunity.com/profiles/${link.steam_id}`;
-        return `${offset + index + 1}. ${member}\n   Steam: [${link.steam_id}](${steamUrl})`;
+        return `${offset + index + 1}. ${member}\n   Steam: [${link.steam_id}](<${steamUrl}>)`;
     }).join('\n\n');
 }
 
-function buildRosterContent(roleName, members, filteredMembers, page) {
+const rosterRefreshVersions = new Map();
+
+function nextRosterRefreshVersion(userId, prefix) {
+    const key = `${userId}:${prefix}`;
+    const version = (rosterRefreshVersions.get(key) || 0) + 1;
+    rosterRefreshVersions.set(key, version);
+    return { key, version };
+}
+
+function isCurrentRosterRefresh(key, version) {
+    return rosterRefreshVersions.get(key) === version;
+}
+
+function buildRosterContent(roleName, members, filteredMembers, page, status = 'cached') {
     const start = page.page * PAGE_SIZE;
     const lines = formatRosterLines(page.items, start);
+
+    const statusLine = status === 'updated'
+        ? '✅ **List updated — showing current Discord data.**'
+        : status === 'error'
+            ? '⚠️ **Unable to refresh the list. Showing cached data.**'
+            : '⚠️ **This list is currently cached.**\n🔄 Updating list from Discord…';
 
     return (
         `**${roleName} Roster**\n` +
         `Total: **${members.length}**  •  Linked: **${members.filter(member => Boolean(getLink(member.id))).length}**  •  Unlinked: **${members.filter(member => !getLink(member.id)).length}**\n\n` +
         `${lines}\n\n` +
-        `**Page ${page.page + 1} of ${page.totalPages}**`
+        `**Page ${page.page + 1} of ${page.totalPages}**\n\n` +
+        statusLine
     );
+}
+
+async function refreshRosterInteraction(
+    interaction,
+    roleName,
+    roleId,
+    prefix,
+    filter,
+    pageNumber,
+    refreshKey,
+    refreshVersion
+) {
+    try {
+        // A user can click another roster button while this background fetch
+        // is still running. Never allow an older refresh to overwrite the
+        // newer page/filter they are currently viewing.
+        if (!isCurrentRosterRefresh(refreshKey, refreshVersion)) {
+            return;
+        }
+        const members = await getFreshRosterMembers(roleId);
+        const filteredMembers = filterRosterMembers(members, filter);
+        const page = getPage(filteredMembers, pageNumber, PAGE_SIZE);
+
+        if (!isCurrentRosterRefresh(refreshKey, refreshVersion)) {
+            return;
+        }
+
+        const content = buildRosterContent(
+            roleName,
+            members,
+            filteredMembers,
+            page,
+            'updated'
+        );
+
+        const components = [
+            rosterPaginationRow(
+                prefix,
+                filter,
+                page.page,
+                page.totalPages
+            ),
+            rosterFilterRow(prefix, filter)
+        ];
+
+        await interaction.editReply({
+            content: content.length > 2000
+                ? content.slice(0, 1990) + '\n…'
+                : content,
+            components
+        });
+    } catch (error) {
+        console.error(`Roster background refresh error (${roleName}):`, error);
+
+        if (!isCurrentRosterRefresh(refreshKey, refreshVersion)) {
+            return;
+        }
+
+        try {
+            const members = getRosterMembersFromCache(roleId);
+            const filteredMembers = filterRosterMembers(members, filter);
+            const page = getPage(filteredMembers, pageNumber, PAGE_SIZE);
+
+            const content = buildRosterContent(
+                roleName,
+                members,
+                filteredMembers,
+                page,
+                'error'
+            );
+
+            const components = [
+                rosterPaginationRow(
+                    prefix,
+                    filter,
+                    page.page,
+                    page.totalPages
+                ),
+                rosterFilterRow(prefix, filter)
+            ];
+
+            await interaction.editReply({
+                content: content.length > 2000
+                    ? content.slice(0, 1990) + '\n…'
+                    : content,
+                components
+            });
+        } catch (fallbackError) {
+            console.error('Roster cached fallback error:', fallbackError);
+        }
+    }
 }
 
 // ============================================================
@@ -1313,16 +1440,13 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
         return;
     }
 
-    // Discord requires an interaction response within about 3 seconds.
-    // Fetching the complete guild member list can take longer, so acknowledge
-    // the interaction before doing any network/database work.
-    if (interaction.isButton()) {
-        await interaction.deferUpdate();
-    } else {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    }
+    // Show the cached roster immediately so the command feels instant.
+    // A fresh Discord member snapshot is loaded in the background and the
+    // same message is automatically updated when it finishes.
+    const { key: refreshKey, version: refreshVersion } =
+        nextRosterRefreshVersion(interaction.user.id, prefix);
 
-    const members = await getRosterMembers(roleId, !interaction.isButton());
+    const members = getRosterMembersFromCache(roleId);
     const filteredMembers = filterRosterMembers(members, filter);
     const page = getPage(filteredMembers, pageNumber, PAGE_SIZE);
 
@@ -1330,7 +1454,8 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
         roleName,
         members,
         filteredMembers,
-        page
+        page,
+        'cached'
     );
 
     const components = [
@@ -1351,10 +1476,28 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
     };
 
     if (interaction.isButton()) {
-        await interaction.editReply(payload);
+        await interaction.update(payload);
     } else {
-        await interaction.editReply(payload);
+        await interaction.reply({
+            ...payload,
+            flags: MessageFlags.Ephemeral
+        });
     }
+
+    // Do not make the user wait for the full Discord member fetch.
+    // Once it completes, edit this same roster message automatically.
+    refreshRosterInteraction(
+        interaction,
+        roleName,
+        roleId,
+        prefix,
+        filter,
+        pageNumber,
+        refreshKey,
+        refreshVersion
+    ).catch(error => {
+        console.error('Unexpected roster background refresh error:', error);
+    });
 }
 
 async function handleStats(interaction) {
@@ -1894,19 +2037,15 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            if (id.startsWith('listrecruit:prev:') || id.startsWith('listgump:prev:') ||
-                id.startsWith('listrecruit:next:') || id.startsWith('listgump:next:')) {
-                const [type, direction, filter, pageText] = id.split(':');
-                const currentPage = Number(pageText);
-                const page = Number.isFinite(currentPage)
-                    ? currentPage + (direction === 'next' ? 1 : -1)
-                    : 0;
+            if (id.startsWith('listrecruit:page:') || id.startsWith('listgump:page:')) {
+                const [type, , filter, pageText] = id.split(':');
+                const page = Number(pageText);
 
                 await handleListPage(
                     interaction,
                     type,
                     filter,
-                    Math.max(0, page)
+                    Number.isFinite(page) ? page : 0
                 );
                 return;
             }
@@ -1945,9 +2084,7 @@ client.on('interactionCreate', async interaction => {
         };
 
         try {
-            if (interaction.deferred && interaction.isButton()) {
-                await interaction.editReply(message);
-            } else if (interaction.replied || interaction.deferred) {
+            if (interaction.replied || interaction.deferred) {
                 await interaction.followUp(message);
             } else {
                 await interaction.reply(message);

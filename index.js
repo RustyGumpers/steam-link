@@ -695,12 +695,12 @@ function rosterFilterRow(prefix, filter) {
 function rosterPaginationRow(prefix, filter, page, totalPages) {
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-            .setCustomId(`${prefix}:page:${filter}:${Math.max(0, page - 1)}`)
+            .setCustomId(`${prefix}:prev:${filter}:${page}`)
             .setLabel('Previous')
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(page <= 0),
         new ButtonBuilder()
-            .setCustomId(`${prefix}:page:${filter}:${Math.min(totalPages - 1, page + 1)}`)
+            .setCustomId(`${prefix}:next:${filter}:${page}`)
             .setLabel('Next')
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(page >= totalPages - 1)
@@ -1894,15 +1894,19 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            if (id.startsWith('listrecruit:page:') || id.startsWith('listgump:page:')) {
-                const [type, , filter, pageText] = id.split(':');
-                const page = Number(pageText);
+            if (id.startsWith('listrecruit:prev:') || id.startsWith('listgump:prev:') ||
+                id.startsWith('listrecruit:next:') || id.startsWith('listgump:next:')) {
+                const [type, direction, filter, pageText] = id.split(':');
+                const currentPage = Number(pageText);
+                const page = Number.isFinite(currentPage)
+                    ? currentPage + (direction === 'next' ? 1 : -1)
+                    : 0;
 
                 await handleListPage(
                     interaction,
                     type,
                     filter,
-                    Number.isFinite(page) ? page : 0
+                    Math.max(0, page)
                 );
                 return;
             }

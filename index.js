@@ -754,18 +754,29 @@ function rosterFilterRow(prefix, filter) {
 }
 
 function rosterPaginationRow(prefix, filter, page, totalPages) {
-    return new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`${prefix}:prev:${filter}:${Math.max(0, page - 1)}`)
-            .setLabel('Previous')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(page <= 0),
-        new ButtonBuilder()
-            .setCustomId(`${prefix}:next:${filter}:${Math.min(totalPages - 1, page + 1)}`)
-            .setLabel('Next')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(page >= totalPages - 1)
-    );
+    // Never send duplicate custom IDs to Discord. In particular, when there is
+    // only one page, both old Previous/Next buttons would resolve to page 0.
+    const buttons = [];
+
+    if (page > 0) {
+        buttons.push(
+            new ButtonBuilder()
+                .setCustomId(`${prefix}:prev:${filter}:${page - 1}`)
+                .setLabel('Previous')
+                .setStyle(ButtonStyle.Secondary)
+        );
+    }
+
+    if (page < totalPages - 1) {
+        buttons.push(
+            new ButtonBuilder()
+                .setCustomId(`${prefix}:next:${filter}:${page + 1}`)
+                .setLabel('Next')
+                .setStyle(ButtonStyle.Secondary)
+        );
+    }
+
+    return buttons.length ? new ActionRowBuilder().addComponents(buttons) : null;
 }
 
 function formatRosterLines(members, offset = 0) {
@@ -846,15 +857,15 @@ async function refreshRosterInteraction(
             'updated'
         );
 
-        const components = [
-            rosterPaginationRow(
-                prefix,
-                filter,
-                page.page,
-                page.totalPages
-            ),
-            rosterFilterRow(prefix, filter)
-        ];
+        const components = [];
+        const pagination = rosterPaginationRow(
+            prefix,
+            filter,
+            page.page,
+            page.totalPages
+        );
+        if (pagination) components.push(pagination);
+        components.push(rosterFilterRow(prefix, filter));
 
         await interaction.editReply({
             content: content.length > 2000
@@ -1496,15 +1507,15 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
         'cached'
     );
 
-    const components = [
-        rosterPaginationRow(
-            prefix,
-            filter,
-            page.page,
-            page.totalPages
-        ),
-        rosterFilterRow(prefix, filter)
-    ];
+    const components = [];
+    const pagination = rosterPaginationRow(
+        prefix,
+        filter,
+        page.page,
+        page.totalPages
+    );
+    if (pagination) components.push(pagination);
+    components.push(rosterFilterRow(prefix, filter));
 
     const payload = {
         content: content.length > 2000
@@ -1965,7 +1976,7 @@ async function handleAuditPage(interaction, pageNumber) {
 // DISCORD EVENTS
 // ============================================================
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
 
     try {

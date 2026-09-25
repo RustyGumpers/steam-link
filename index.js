@@ -639,6 +639,7 @@ function scheduleRelayPublish() {
 
 async function getRosterMembers(roleId) {
     const snapshot = await fetchGuildMembers({ force: true });
+
     if (!snapshot.complete) {
         throw new Error('Discord member snapshot is incomplete.');
     }
@@ -646,23 +647,95 @@ async function getRosterMembers(roleId) {
     return Array.from(snapshot.members.values())
         .filter(member => member.roles.cache.has(roleId))
         .sort((a, b) =>
-            a.user.username.localeCompare(b.user.username, undefined, { sensitivity: 'base' })
+            a.user.username.localeCompare(
+                b.user.username,
+                undefined,
+                { sensitivity: 'base' }
+            )
         );
 }
 
+function filterRosterMembers(members, filter) {
+    if (filter === 'linked') {
+        return members.filter(member => Boolean(getLink(member.id)));
+    }
+
+    if (filter === 'unlinked') {
+        return members.filter(member => !getLink(member.id));
+    }
+
+    return members;
+}
+
+function rosterFilterRow(prefix, filter) {
+    const labels = [
+        ['all', 'All'],
+        ['linked', 'Linked'],
+        ['unlinked', 'Unlinked']
+    ];
+
+    return new ActionRowBuilder().addComponents(
+        ...labels.map(([value, label]) =>
+            new ButtonBuilder()
+                .setCustomId(`${prefix}:filter:${value}:0`)
+                .setLabel(label)
+                .setStyle(
+                    filter === value
+                        ? ButtonStyle.Primary
+                        : ButtonStyle.Secondary
+                )
+        )
+    );
+}
+
+function rosterPaginationRow(prefix, filter, page, totalPages) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`${prefix}:page:${filter}:${Math.max(0, page - 1)}`)
+            .setLabel('Previous')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page <= 0),
+        new ButtonBuilder()
+            .setCustomId(`${prefix}:page:${filter}:${Math.min(totalPages - 1, page + 1)}`)
+            .setLabel('Next')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page >= totalPages - 1)
+    );
+}
+
 function formatRosterLines(members, offset = 0) {
-    if (!members.length) return 'No members currently have this role.';
+    if (!members.length) {
+        return 'No members match this filter.';
+    }
 
     return members.map((member, index) => {
         const link = getLink(member.id);
-        if (!link) return `${offset + index + 1}. ⚠️ ${member}`;
-        return `${offset + index + 1}. ${member} — \`${link.steam_id}\``;
+
+        if (!link) {
+            return `${offset + index + 1}. ⚠️ ${member}\n   Steam: Not Linked`;
+        }
+
+        const steamUrl = `https://steamcommunity.com/profiles/${link.steam_id}`;
+        return `${offset + index + 1}. ${member}\n   Steam: [${link.steam_id}](${steamUrl})`;
     }).join('\n\n');
+}
+
+function buildRosterContent(roleName, members, filteredMembers, page) {
+    const start = page.page * PAGE_SIZE;
+    const lines = formatRosterLines(page.items, start);
+
+    return (
+        `**${roleName} Roster**\n` +
+        `Total: **${members.length}**  •  Linked: **${members.filter(member => Boolean(getLink(member.id))).length}**  •  Unlinked: **${members.filter(member => !getLink(member.id)).length}**\n\n` +
+        `${lines}\n\n` +
+        `**Page ${page.page + 1} of ${page.totalPages}**`
+    );
 }
 
 // ============================================================
 // SLASH COMMANDS
 // ============================================================
+
 
 const commands = [
     new SlashCommandBuilder()
@@ -1217,47 +1290,61 @@ async function handleList(interaction) {
     });
 }
 
-async function handleRoleList(interaction, roleName, roleId, prefix) {
+async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'all', pageNumber = 0) {
     const allowed =
         canSelfLink(interaction.member) ||
         isPrivileged(interaction.member);
 
     if (!allowed) {
-        await interaction.reply({
-            content:
-                `You need the Recruit, Gump, Administrator, or Consigliere role to use this command.`,
+        const response = {
+            content: 'You need the Recruit, Gump, Administrator, or Consigliere role to use this command.',
             flags: MessageFlags.Ephemeral
-        });
+        };
+
+        if (interaction.isButton()) {
+            await interaction.reply(response);
+        } else {
+            await interaction.reply(response);
+        }
         return;
     }
 
     const members = await getRosterMembers(roleId);
-    const page = getPage(members, 0, PAGE_SIZE);
+    const filteredMembers = filterRosterMembers(members, filter);
+    const page = getPage(filteredMembers, pageNumber, PAGE_SIZE);
 
-    const content =
-        `**${roleName} Roster — ${members.length} member(s)**\n\n` +
-        formatRosterLines(page.items, page.page * PAGE_SIZE);
-
-    const components = [];
-
-    const row = paginationRow(
-        prefix,
-        page.page,
-        page.totalPages
+    const content = buildRosterContent(
+        roleName,
+        members,
+        filteredMembers,
+        page
     );
 
-    if (row) {
-        components.push(row);
-    }
+    const components = [
+        rosterPaginationRow(
+            prefix,
+            filter,
+            page.page,
+            page.totalPages
+        ),
+        rosterFilterRow(prefix, filter)
+    ];
 
-    await interaction.reply({
-        content:
-            content.length > 2000
-                ? content.slice(0, 1990) + '\n…'
-                : content,
-        components,
-        flags: MessageFlags.Ephemeral
-    });
+    const payload = {
+        content: content.length > 2000
+            ? content.slice(0, 1990) + '\n…'
+            : content,
+        components
+    };
+
+    if (interaction.isButton()) {
+        await interaction.update(payload);
+    } else {
+        await interaction.reply({
+            ...payload,
+            flags: MessageFlags.Ephemeral
+        });
+    }
 }
 
 async function handleStats(interaction) {
@@ -1602,51 +1689,18 @@ async function handlePrune(interaction) {
 // BUTTON HANDLING
 // ============================================================
 
-async function handleListPage(interaction, type, pageNumber) {
-    let roleName;
-    let roleId;
-    let prefix;
+async function handleListPage(interaction, type, filter, pageNumber) {
+    const roleName = type === 'listrecruit' ? 'Recruit' : 'Gump';
+    const roleId = type === 'listrecruit' ? ROLE_RECRUIT : ROLE_GUMP;
 
-    if (type === 'listrecruit') {
-        roleName = 'Recruit';
-        roleId = ROLE_RECRUIT;
-        prefix = 'listrecruit';
-    } else {
-        roleName = 'Gump';
-        roleId = ROLE_GUMP;
-        prefix = 'listgump';
-    }
-
-    if (!canSelfLink(interaction.member) && !isPrivileged(interaction.member)) {
-        await interaction.reply({ content: 'You need the Recruit, Gump, Administrator, or Consigliere role to use this command.', flags: MessageFlags.Ephemeral });
-        return;
-    }
-
-    const members = await getRosterMembers(roleId);
-    const page = getPage(members, pageNumber, PAGE_SIZE);
-    const content =
-        `**${roleName} Roster — ${members.length} member(s)**\n\n` +
-        formatRosterLines(page.items, page.page * PAGE_SIZE);
-
-    const components = [];
-
-    const row = paginationRow(
-        prefix,
-        page.page,
-        page.totalPages
+    await handleRoleList(
+        interaction,
+        roleName,
+        roleId,
+        type,
+        filter,
+        pageNumber
     );
-
-    if (row) {
-        components.push(row);
-    }
-
-    await interaction.update({
-        content:
-            content.length > 2000
-                ? content.slice(0, 1990) + '\n…'
-                : content,
-        components
-    });
 }
 
 async function handleAuditPage(interaction, pageNumber) {
@@ -1755,7 +1809,9 @@ client.on('interactionCreate', async interaction => {
                         interaction,
                         'Recruit',
                         ROLE_RECRUIT,
-                        'listrecruit'
+                        'listrecruit',
+                        'all',
+                        0
                     );
                     break;
 
@@ -1764,7 +1820,9 @@ client.on('interactionCreate', async interaction => {
                         interaction,
                         'Gump',
                         ROLE_GUMP,
-                        'listgump'
+                        'listgump',
+                        'all',
+                        0
                     );
                     break;
 
@@ -1826,28 +1884,27 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            if (id.startsWith('listrecruit:page:')) {
-                const page = Number(
-                    id.split(':')[2]
-                );
+            if (id.startsWith('listrecruit:page:') || id.startsWith('listgump:page:')) {
+                const [type, , filter, pageText] = id.split(':');
+                const page = Number(pageText);
 
                 await handleListPage(
                     interaction,
-                    'listrecruit',
-                    page
+                    type,
+                    filter,
+                    Number.isFinite(page) ? page : 0
                 );
                 return;
             }
 
-            if (id.startsWith('listgump:page:')) {
-                const page = Number(
-                    id.split(':')[2]
-                );
+            if (id.startsWith('listrecruit:filter:') || id.startsWith('listgump:filter:')) {
+                const [type, , filter] = id.split(':');
 
                 await handleListPage(
                     interaction,
-                    'listgump',
-                    page
+                    type,
+                    filter,
+                    0
                 );
                 return;
             }

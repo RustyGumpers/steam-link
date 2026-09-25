@@ -637,11 +637,15 @@ function scheduleRelayPublish() {
 // ROSTER FORMATTING
 // ============================================================
 
-async function getRosterMembers(roleId) {
-    const snapshot = await fetchGuildMembers({ force: true });
+async function getRosterMembers(roleId, forceRefresh = false) {
+    // Roster buttons should NEVER trigger a fresh Gateway member fetch.
+    // Discord can rate-limit repeated guild.members.fetch() calls, which
+    // causes the button interaction to appear to hang or fail. The bot has
+    // the GuildMembers intent, so use the populated cache for button clicks.
+    const snapshot = await fetchGuildMembers({ force: forceRefresh });
 
     if (!snapshot.complete) {
-        throw new Error('Discord member snapshot is incomplete.');
+        throw new Error(`Discord member snapshot is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}).`);
     }
 
     return Array.from(snapshot.members.values())
@@ -1318,7 +1322,7 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     }
 
-    const members = await getRosterMembers(roleId);
+    const members = await getRosterMembers(roleId, !interaction.isButton());
     const filteredMembers = filterRosterMembers(members, filter);
     const page = getPage(filteredMembers, pageNumber, PAGE_SIZE);
 
@@ -1937,7 +1941,9 @@ client.on('interactionCreate', async interaction => {
         };
 
         try {
-            if (interaction.replied || interaction.deferred) {
+            if (interaction.deferred && interaction.isButton()) {
+                await interaction.editReply(message);
+            } else if (interaction.replied || interaction.deferred) {
                 await interaction.followUp(message);
             } else {
                 await interaction.reply(message);

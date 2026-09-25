@@ -1,0 +1,17 @@
+{
+  "name": "discord-steam-nickname-sync",
+  "version": "11.0.1",
+  "private": true,
+  "description": "Discord to Steam local nickname sync bot, SQLite database, and HTTP API for Railway",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "discord.js": "^14.24.2"
+  }
+}

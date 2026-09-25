@@ -329,9 +329,9 @@ async function getGuild() {
 }
 
 // Discord Gateway member-list requests (opcode 8) are rate limited.
-// Keep roster operations on the already-cached member collection and only
-// request the full guild member list when a caller explicitly needs a fresh
-// membership snapshot (nickname sync / prune).
+// Use the cached collection for instant roster display, coalesce concurrent
+// full-member requests, and keep a short successful-fetch cooldown so the
+// relay timer and commands do not repeatedly request the entire guild.
 const MEMBER_FETCH_COOLDOWN_MS = 60 * 1000;
 let lastSuccessfulMemberFetch = 0;
 let memberFetchPromise = null;
@@ -353,38 +353,83 @@ function getGatewayRetryAfterMs(error) {
 async function fetchGuildMembers(options = {}) {
     const guild = await getGuild();
     const force = options.force !== false;
+    const cacheComplete = guild.members.cache.size >= guild.memberCount;
 
     if (!force) {
         return {
             guild,
             members: guild.members.cache,
-            complete: guild.members.cache.size >= guild.memberCount,
+            complete: cacheComplete,
             fetched: false
         };
     }
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            const members = await guild.members.fetch();
-            const complete = members.size >= guild.memberCount;
+    // Do not send another Gateway member-list request when a complete
+    // snapshot was fetched recently. The Discord client cache is already
+    // updated by normal member events, so callers still see current data
+    // without repeatedly requesting the entire guild.
+    if (
+        cacheComplete &&
+        lastSuccessfulMemberFetch > 0 &&
+        Date.now() - lastSuccessfulMemberFetch < MEMBER_FETCH_COOLDOWN_MS
+    ) {
+        return {
+            guild,
+            members: guild.members.cache,
+            complete: true,
+            fetched: false
+        };
+    }
 
-            if (!complete) {
-                throw new Error(
-                    `Discord member snapshot incomplete (${members.size}/${guild.memberCount}).`
+    // Coalesce simultaneous callers. Startup relay publishing, the 60-second
+    // relay timer, /list, /stats, /prune, and roster refreshes can otherwise
+    // all issue their own Gateway member-list request at the same time.
+    if (memberFetchPromise) {
+        return memberFetchPromise;
+    }
+
+    memberFetchPromise = (async () => {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const members = await guild.members.fetch();
+                const complete = members.size >= guild.memberCount;
+
+                if (!complete) {
+                    throw new Error(
+                        `Discord member snapshot incomplete (${members.size}/${guild.memberCount}).`
+                    );
+                }
+
+                lastSuccessfulMemberFetch = Date.now();
+
+                return {
+                    guild,
+                    members,
+                    complete: true,
+                    fetched: true
+                };
+            } catch (error) {
+                const retryAfterMs = getGatewayRetryAfterMs(error);
+
+                if (attempt === 3) {
+                    throw error;
+                }
+
+                await sleep(
+                    retryAfterMs > 0
+                        ? retryAfterMs + 500
+                        : 1500 * attempt
                 );
             }
-
-            return {
-                guild,
-                members,
-                complete: true,
-                fetched: true
-            };
-        } catch (error) {
-            const retryAfterMs = getGatewayRetryAfterMs(error);
-            if (attempt === 3) throw error;
-            await sleep(retryAfterMs > 0 ? retryAfterMs + 500 : 1500 * attempt);
         }
+
+        throw new Error('Discord member fetch failed unexpectedly.');
+    })();
+
+    try {
+        return await memberFetchPromise;
+    } finally {
+        memberFetchPromise = null;
     }
 }
 
@@ -711,12 +756,12 @@ function rosterFilterRow(prefix, filter) {
 function rosterPaginationRow(prefix, filter, page, totalPages) {
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-            .setCustomId(`${prefix}:page:${filter}:${Math.max(0, page - 1)}`)
+            .setCustomId(`${prefix}:prev:${filter}:${Math.max(0, page - 1)}`)
             .setLabel('Previous')
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(page <= 0),
         new ButtonBuilder()
-            .setCustomId(`${prefix}:page:${filter}:${Math.min(totalPages - 1, page + 1)}`)
+            .setCustomId(`${prefix}:next:${filter}:${Math.min(totalPages - 1, page + 1)}`)
             .setLabel('Next')
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(page >= totalPages - 1)
@@ -740,19 +785,6 @@ function formatRosterLines(members, offset = 0) {
     }).join('\n\n');
 }
 
-const rosterRefreshVersions = new Map();
-
-function nextRosterRefreshVersion(userId, prefix) {
-    const key = `${userId}:${prefix}`;
-    const version = (rosterRefreshVersions.get(key) || 0) + 1;
-    rosterRefreshVersions.set(key, version);
-    return { key, version };
-}
-
-function isCurrentRosterRefresh(key, version) {
-    return rosterRefreshVersions.get(key) === version;
-}
-
 function buildRosterContent(roleName, members, filteredMembers, page, status = 'cached') {
     const start = page.page * PAGE_SIZE;
     const lines = formatRosterLines(page.items, start);
@@ -772,6 +804,21 @@ function buildRosterContent(roleName, members, filteredMembers, page, status = '
     );
 }
 
+// Each roster message gets a refresh version. When a user presses a
+// pagination/filter button, the previous background refresh becomes stale
+// and is not allowed to overwrite the newer page/filter.
+const rosterRefreshVersions = new Map();
+
+function nextRosterRefreshVersion(messageKey) {
+    const next = (rosterRefreshVersions.get(messageKey) || 0) + 1;
+    rosterRefreshVersions.set(messageKey, next);
+    return next;
+}
+
+function isCurrentRosterRefresh(messageKey, version) {
+    return rosterRefreshVersions.get(messageKey) === version;
+}
+
 async function refreshRosterInteraction(
     interaction,
     roleName,
@@ -779,23 +826,17 @@ async function refreshRosterInteraction(
     prefix,
     filter,
     pageNumber,
-    refreshKey,
+    messageKey,
     refreshVersion
 ) {
     try {
-        // A user can click another roster button while this background fetch
-        // is still running. Never allow an older refresh to overwrite the
-        // newer page/filter they are currently viewing.
-        if (!isCurrentRosterRefresh(refreshKey, refreshVersion)) {
+        const members = await getFreshRosterMembers(roleId);
+
+        if (!isCurrentRosterRefresh(messageKey, refreshVersion)) {
             return;
         }
-        const members = await getFreshRosterMembers(roleId);
         const filteredMembers = filterRosterMembers(members, filter);
         const page = getPage(filteredMembers, pageNumber, PAGE_SIZE);
-
-        if (!isCurrentRosterRefresh(refreshKey, refreshVersion)) {
-            return;
-        }
 
         const content = buildRosterContent(
             roleName,
@@ -824,7 +865,7 @@ async function refreshRosterInteraction(
     } catch (error) {
         console.error(`Roster background refresh error (${roleName}):`, error);
 
-        if (!isCurrentRosterRefresh(refreshKey, refreshVersion)) {
+        if (!isCurrentRosterRefresh(messageKey, refreshVersion)) {
             return;
         }
 
@@ -1443,9 +1484,6 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
     // Show the cached roster immediately so the command feels instant.
     // A fresh Discord member snapshot is loaded in the background and the
     // same message is automatically updated when it finishes.
-    const { key: refreshKey, version: refreshVersion } =
-        nextRosterRefreshVersion(interaction.user.id, prefix);
-
     const members = getRosterMembersFromCache(roleId);
     const filteredMembers = filterRosterMembers(members, filter);
     const page = getPage(filteredMembers, pageNumber, PAGE_SIZE);
@@ -1486,6 +1524,22 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
 
     // Do not make the user wait for the full Discord member fetch.
     // Once it completes, edit this same roster message automatically.
+    // Use the Discord message ID so later button clicks can invalidate an
+    // older background refresh for the same roster message.
+    let messageKey;
+
+    try {
+        const replyMessage = interaction.isButton()
+            ? interaction.message
+            : await interaction.fetchReply();
+
+        messageKey = replyMessage?.id || interaction.id;
+    } catch {
+        messageKey = interaction.message?.id || interaction.id;
+    }
+
+    const refreshVersion = nextRosterRefreshVersion(messageKey);
+
     refreshRosterInteraction(
         interaction,
         roleName,
@@ -1493,7 +1547,7 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
         prefix,
         filter,
         pageNumber,
-        refreshKey,
+        messageKey,
         refreshVersion
     ).catch(error => {
         console.error('Unexpected roster background refresh error:', error);
@@ -2037,8 +2091,13 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            if (id.startsWith('listrecruit:page:') || id.startsWith('listgump:page:')) {
-                const [type, , filter, pageText] = id.split(':');
+            if (
+                id.startsWith('listrecruit:prev:') ||
+                id.startsWith('listrecruit:next:') ||
+                id.startsWith('listgump:prev:') ||
+                id.startsWith('listgump:next:')
+            ) {
+                const [type, direction, filter, pageText] = id.split(':');
                 const page = Number(pageText);
 
                 await handleListPage(

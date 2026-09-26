@@ -2094,8 +2094,13 @@ async function scanOnlineMembersForLinkPrompts() {
         const snapshot = await fetchGuildMembers({ force: false });
         if (!snapshot.complete) {
             console.warn(
-                `Skipping startup Steam link prompt scan because the member cache is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}). Presence events will handle members as they come online.`
+                `Startup Steam link prompt scan deferred because the member cache is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}).`
             );
+            setTimeout(() => {
+                scanOnlineMembersForLinkPrompts().catch(error => {
+                    console.error('Deferred Steam link prompt scan failed:', error);
+                });
+            }, 30_000);
             return;
         }
 

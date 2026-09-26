@@ -33,7 +33,6 @@ let config = {
     },
     settings: {
         listPageSize: envOr('LIST_PAGE_SIZE', 10),
-        auditPageSize: envOr('AUDIT_PAGE_SIZE', 10),
         maxAuditEntries: envOr('MAX_AUDIT_ENTRIES', 250),
         linkPromptTimezone: envOr('LINK_PROMPT_TIMEZONE', process.env.TZ || 'UTC'),
         backupRetention: envOr('BACKUP_RETENTION', 7)
@@ -135,7 +134,6 @@ function positiveInteger(value, fallback, max = Number.MAX_SAFE_INTEGER) {
 }
 
 const PAGE_SIZE = positiveInteger(config.settings?.listPageSize, 10, 10);
-const AUDIT_PAGE_SIZE = positiveInteger(config.settings?.auditPageSize, 10, 50);
 const MAX_AUDIT_ENTRIES = positiveInteger(config.settings?.maxAuditEntries, 250, 5000);
 const BACKUP_RETENTION = positiveInteger(config.settings?.backupRetention, 7, 100);
 const DISCORD_SAFE_CONTENT_LIMIT = 1900;
@@ -1158,7 +1156,22 @@ async function handleLink(interaction) {
         db.prepare(`DELETE FROM link_prompt_notifications WHERE discord_id = ?`).run(member.id);
     });
 
-    saveLink();
+    try {
+        saveLink();
+    } catch (error) {
+        if (error?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+            const current = getLinkBySteamId(steamId);
+            await interaction.reply({
+                content: current
+                    ? `That Steam ID is already linked to <@${current.discord_id}>.`
+                    : 'That Steam ID was linked by another request. Please try again.',
+                flags: MessageFlags.Ephemeral
+            });
+            return;
+        }
+        throw error;
+    }
+
     await interaction.reply({
         content:
             `Linked ${member} to Steam ID \`${steamId}\`.`,
@@ -1422,7 +1435,22 @@ async function handleEdit(interaction) {
         db.prepare(`DELETE FROM nickname_cleanup WHERE steam_id = ?`).run(newSteamId);
     });
 
-    editLink();
+    try {
+        editLink();
+    } catch (error) {
+        if (error?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+            const current = getLinkBySteamId(newSteamId);
+            await interaction.reply({
+                content: current && current.discord_id !== member.id
+                    ? `That Steam ID is already linked to <@${current.discord_id}>.`
+                    : 'That Steam ID was linked by another request. Please try again.',
+                flags: MessageFlags.Ephemeral
+            });
+            return;
+        }
+        throw error;
+    }
+
     await interaction.reply({
         content:
             `Changed ${member}'s Steam ID from \`${link.steam_id}\` to \`${newSteamId}\`.`,
@@ -1856,7 +1884,26 @@ async function handlePrune(interaction) {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const snapshot = await fetchGuildMembers({ force: true });
+    let snapshot;
+    try {
+        snapshot = await fetchGuildMembers({ force: true });
+    } catch (error) {
+        await interaction.editReply({
+            content:
+                'Discord member data could not be refreshed safely, so no links were pruned. Please try again shortly.'
+        });
+        console.error('Prune member refresh failed:', error);
+        return;
+    }
+
+    if (!snapshot.complete || snapshot.members.size !== snapshot.guild.memberCount) {
+        await interaction.editReply({
+            content:
+                'Discord member data is incomplete, so no links were pruned. Please try again shortly.'
+        });
+        return;
+    }
+
     const members = snapshot.members;
 
     const rows = db.prepare(`

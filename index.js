@@ -686,6 +686,12 @@ const relayServer = http.createServer((req, res) => {
 });
 
 const PORT = positiveInteger(process.env.PORT, 3000, 65535);
+
+relayServer.on('error', error => {
+    console.error('Relay HTTP server error:', error);
+    process.exitCode = 1;
+});
+
 relayServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Railway HTTP relay listening on 0.0.0.0:${PORT}`);
 });
@@ -718,6 +724,8 @@ async function publishRelaySnapshot() {
 }
 
 let relayPublishTimer = null;
+let relayInterval = null;
+
 function scheduleRelayPublish() {
     clearTimeout(relayPublishTimer);
     relayPublishTimer = setTimeout(() => {
@@ -2177,7 +2185,10 @@ client.once('clientReady', async () => {
     // Start the recurring relay timer immediately. Initial sync/prompt work
     // is intentionally asynchronous so a slow guild member fetch cannot
     // block the bot's normal event loop setup.
-    setInterval(() => publishRelaySnapshot().catch(console.error), 60_000);
+    relayInterval = setInterval(
+        () => publishRelaySnapshot().catch(console.error),
+        60_000
+    );
 
     publishRelaySnapshot().catch(error => {
         console.error('Initial relay snapshot failed:', error);
@@ -2448,4 +2459,76 @@ client.on('guildMemberRemove', member => {
     scheduleRelayPublish();
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.on('error', error => {
+    console.error('Discord client error:', error);
+});
+
+client.on('shardError', error => {
+    console.error('Discord gateway shard error:', error);
+});
+
+async function gracefulShutdown(signal) {
+    console.log(`Received ${signal}; shutting down gracefully.`);
+
+    if (relayPublishTimer) {
+        clearTimeout(relayPublishTimer);
+        relayPublishTimer = null;
+    }
+
+    if (relayInterval) {
+        clearInterval(relayInterval);
+        relayInterval = null;
+    }
+
+    try {
+        client.destroy();
+    } catch (error) {
+        console.warn('Discord client shutdown error:', error.message || error);
+    }
+
+    await new Promise(resolve => {
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+        };
+
+        try {
+            relayServer.close(finish);
+        } catch {
+            finish();
+        }
+
+        setTimeout(finish, 5000);
+    });
+
+    try {
+        if (db.open) {
+            db.close();
+        }
+    } catch (error) {
+        console.warn('SQLite shutdown error:', error.message || error);
+    }
+
+    process.exit(0);
+}
+
+process.once('SIGTERM', () => {
+    gracefulShutdown('SIGTERM').catch(error => {
+        console.error('Graceful shutdown failed:', error);
+        process.exit(1);
+    });
+});
+
+process.once('SIGINT', () => {
+    gracefulShutdown('SIGINT').catch(error => {
+        console.error('Graceful shutdown failed:', error);
+        process.exit(1);
+    });
+});
+
+client.login(process.env.DISCORD_TOKEN).catch(error => {
+    console.error('Discord login failed:', error);
+    process.exitCode = 1;
+});

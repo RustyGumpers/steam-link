@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.3
+// @version      10.1.5
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -46,21 +46,25 @@
             const value = GM_getValue(key, undefined);
             if (value !== undefined && value !== null) return value;
         } catch {}
-        try {
-            const value = localStorage.getItem(key);
-            return value === null ? fallback : value;
-        } catch {}
         return fallback;
     }
 
     function writeStoredValue(key, value) {
         try { GM_setValue(key, value); } catch {}
-        try { localStorage.setItem(key, String(value)); } catch {}
     }
 
     function removeStoredValue(key) {
         try { GM_setValue(key, ''); } catch {}
-        try { localStorage.removeItem(key); } catch {}
+    }
+
+    function migrateLegacyTokenStorage() {
+        try {
+            const existing = String(GM_getValue(TOKEN_KEY, '') || '').trim();
+            if (existing) return;
+            const legacy = String(localStorage.getItem(TOKEN_KEY) || '').trim();
+            if (/^[a-f0-9]{64}$/i.test(legacy)) GM_setValue(TOKEN_KEY, legacy);
+            if (legacy) localStorage.removeItem(TOKEN_KEY);
+        } catch {}
     }
 
     function getToken() {
@@ -414,8 +418,18 @@
                 .map(([steamId, nickname]) => `${steamId}|${nickname === null ? '<missing>' : nickname}`)
                 .sort()
                 .join('\n');
-            const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
-            if (!force && signature === previous) {
+
+            const completedSignature = [...desired.entries()]
+                .filter(([, nickname]) => nickname !== null)
+                .map(([steamId, nickname]) => `${steamId}|${nickname}`)
+                .sort()
+                .join('\n');
+
+            const previousCompleted = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
+            const hasMissing = [...desired.values()].some(value => value === null);
+            const shouldUpdateMatching = force || completedSignature !== previousCompleted;
+
+            if (!force && !hasMissing && !shouldUpdateMatching) {
                 setStatus('Already synchronized.');
                 return;
             }

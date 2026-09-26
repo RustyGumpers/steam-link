@@ -868,7 +868,8 @@ async function refreshRosterInteraction(
 
         const components = buildRosterComponents(prefix, filter, page);
 
-        await interaction.editReply({
+        const replyMessage = await interaction.fetchReply();
+        await replyMessage.edit({
             content: content.length > 2000
                 ? content.slice(0, 1990) + '\n…'
                 : content,

@@ -1228,7 +1228,7 @@ async function handleRosterLinkModal(interaction, targetId) {
 
     if (getLink(member.id)) {
         await interaction.reply({
-            content: `${member} is already linked. Use `/lookup` to see the existing link.`,
+            content: `${member} is already linked. Use \\`/lookup\\` to see the existing link.`,
             flags: MessageFlags.Ephemeral
         });
         return;

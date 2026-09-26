@@ -254,25 +254,6 @@
         );
     }
 
-    function getSteamFriendName(block) {
-        if (!block) return '';
-
-        const selectors = [
-            '.friend_block_v2_name',
-            '.friend_block_v2_name a',
-            '.friend_block_v2_name span',
-            '[class*="friend_block"][class*="name"]'
-        ];
-
-        for (const selector of selectors) {
-            const element = block.querySelector(selector);
-            const name = trimNickname(element?.textContent || '');
-            if (name) return name;
-        }
-
-        return '';
-    }
-
     async function scanFriends() {
         for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
             if (stopRequested) throw new Error('Sync stopped.');
@@ -426,7 +407,9 @@
 
                 desired.set(
                     steamId,
-                    applyCustomPrefix(serverNickname)
+                    state?.role
+                        ? applyCustomPrefix(serverNickname)
+                        : serverNickname
                 );
             }
 

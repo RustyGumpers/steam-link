@@ -218,25 +218,20 @@
     function getFriendBlocks() {
         const friends = new Map();
 
-        // Steam has used several different friend-list DOM structures.
-        // Do not require a particular friend-block class; collect every valid
-        // 17-digit Steam ID exposed by the current Friends page.
-        for (const node of document.querySelectorAll('[data-steamid]')) {
+        // Only collect IDs from actual Steam friend-entry containers.
+        for (const node of document.querySelectorAll('.friend_block_v2[data-steamid], .friend_block[data-steamid]')) {
             const steamId = String(node.getAttribute('data-steamid') || '').trim();
-            if (/^\d{17}$/.test(steamId)) {
-                const block = node.closest('.friend_block_v2, .friend_block, .friend_block_content') || node;
-                friends.set(steamId, block);
-            }
+            if (/^\d{17}$/.test(steamId)) friends.set(steamId, node);
         }
 
-        // Also collect IDs from profile links in case Steam does not expose
-        // data-steamid on the friend container.
-        for (const link of document.querySelectorAll('a[href*="/profiles/"]')) {
+        // Some Steam layouts expose the ID only on the profile link. Keep the
+        // fallback scoped to known friend-entry containers so unrelated profile
+        // links elsewhere on the page cannot be mistaken for friends.
+        for (const link of document.querySelectorAll('.friend_block_v2 a[href*="/profiles/"], .friend_block a[href*="/profiles/"]')) {
             const match = String(link.href || '').match(/\/profiles\/(\d{17})(?:[/?#]|$)/);
             if (!match) continue;
-            const steamId = match[1];
-            const block = link.closest('.friend_block_v2, .friend_block, .friend_block_content, [data-steamid]') || link;
-            friends.set(steamId, block);
+            const block = link.closest('.friend_block_v2, .friend_block');
+            if (block) friends.set(match[1], block);
         }
 
         return friends;

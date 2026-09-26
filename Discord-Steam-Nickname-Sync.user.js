@@ -253,6 +253,25 @@
         );
     }
 
+    function getSteamFriendName(block) {
+        if (!block) return '';
+
+        const selectors = [
+            '.friend_block_v2_name',
+            '.friend_block_v2_name a',
+            '.friend_block_v2_name span',
+            '[class*="friend_block"][class*="name"]'
+        ];
+
+        for (const selector of selectors) {
+            const element = block.querySelector(selector);
+            const name = trimNickname(element?.textContent || '');
+            if (name) return name;
+        }
+
+        return '';
+    }
+
     async function scanFriends() {
         for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
             if (stopRequested) throw new Error('Sync stopped.');
@@ -383,23 +402,46 @@
                 throw new Error('Discord returned an empty sync state. No nicknames were changed.');
             }
 
-            const signature = stateSignature(data.states);
+            const friends = await scanFriends();
+            const desired = new Map();
+            const unresolved = [];
+
+            for (const state of data.states) {
+                const steamId = getStateSteamId(state);
+                if (!steamId || steamId === currentSteamId) continue;
+
+                const friendBlock = friends.get(steamId);
+                if (!friendBlock) {
+                    if (state?.role) desired.set(steamId, null);
+                    continue;
+                }
+
+                const steamName = getSteamFriendName(friendBlock);
+                if (!steamName) {
+                    unresolved.push(steamId);
+                    continue;
+                }
+
+                if (state?.role) {
+                    desired.set(steamId, applyCustomPrefix(`${state.role} ${steamName}`));
+                } else {
+                    desired.set(steamId, '');
+                }
+            }
+
+            const signature = stateSignature(
+                [...desired.entries()].map(([steamId, nickname]) => ({
+                    steamId,
+                    nickname: nickname || ''
+                }))
+            );
             const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
             if (!force && signature === previous) {
                 setStatus('Already synchronized.');
                 return;
             }
 
-            const friends = await scanFriends();
-            const desired = new Map();
-            for (const state of data.states) {
-                const steamId = getStateSteamId(state);
-                const nickname = getStateNickname(state);
-                if (!steamId || !nickname) continue;
-                desired.set(steamId, applyCustomPrefix(nickname));
-            }
-
-            const matching = [...desired.keys()].filter(steamId => steamId !== currentSteamId && friends.has(steamId));
+            const matching = [...desired.keys()].filter(steamId => steamId !== currentSteamId && friends.has(steamId) && desired.get(steamId) !== null);
             setStatus(
                 `Found ${friends.size} Steam friend(s) and ${desired.size} Discord-linked friend(s).`,
                 `${matching.length} matching friend(s) ready to update.`
@@ -425,12 +467,17 @@
                 );
             }
 
-            const entries = [...desired.entries()].filter(([steamId]) => steamId !== currentSteamId && friends.has(steamId));
+            const entries = [...desired.entries()].filter(
+                ([steamId, nickname]) =>
+                    steamId !== currentSteamId &&
+                    friends.has(steamId) &&
+                    nickname !== null
+            );
             let completed = 0;
 
             if (entries.length === 0) {
                 throw new Error(
-                    `No matching Steam friends to update. Steam found ${friends.size} friend(s), but none of the ${desired.size} Discord-linked Steam IDs matched.`
+                    `No matching Steam friends to update. Steam found ${friends.size} friend(s), but none of the ${desired.size} Discord-linked Steam IDs could be resolved.`
                 );
             }
 

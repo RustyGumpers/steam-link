@@ -47,7 +47,8 @@ if (!process.env.DISCORD_TOKEN) {
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildPresences
     ]
 });
 
@@ -93,6 +94,11 @@ db.exec(`
         steam_id TEXT NOT NULL,
         token_hash TEXT NOT NULL UNIQUE,
         created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS link_prompt_notifications (
+        discord_id TEXT PRIMARY KEY,
+        notified_at INTEGER NOT NULL
     );
 `);
 
@@ -782,46 +788,6 @@ function rosterPaginationRow(prefix, filter, page, totalPages) {
     return buttons.length ? new ActionRowBuilder().addComponents(buttons) : null;
 }
 
-function rosterLinkRows(members) {
-    const unlinked = members.filter(member => !getLink(member.id));
-    const rows = [];
-
-    for (let i = 0; i < unlinked.length; i += 5) {
-        const buttons = unlinked.slice(i, i + 5).map(member =>
-            new ButtonBuilder()
-                .setCustomId(`rosterlink:${member.id}`)
-                .setLabel(`Link ${member.user.username}`.slice(0, 80))
-                .setStyle(ButtonStyle.Success)
-        );
-
-        if (buttons.length) {
-            rows.push(new ActionRowBuilder().addComponents(buttons));
-        }
-    }
-
-    return rows;
-}
-
-function buildRosterComponents(prefix, filter, page) {
-    const components = [];
-
-    const pagination = rosterPaginationRow(
-        prefix,
-        filter,
-        page.page,
-        page.totalPages
-    );
-
-    if (pagination) {
-        components.push(pagination);
-    }
-
-    components.push(rosterFilterRow(prefix, filter));
-    components.push(...rosterLinkRows(page.items));
-
-    return components;
-}
-
 function formatRosterLines(members, offset = 0) {
     if (!members.length) {
         return 'No members match this filter.';
@@ -1150,135 +1116,6 @@ async function handleLink(interaction) {
     scheduleRelayPublish();
 }
 
-async function handleRosterLinkButton(interaction, targetId) {
-    const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-
-    if (!member) {
-        await interaction.reply({
-            content: 'That user could not be found in the server.',
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    if (getLink(member.id)) {
-        await interaction.reply({
-            content: `${member} is already linked.`,
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    if (member.id !== interaction.user.id && !isPrivileged(interaction.member)) {
-        await interaction.reply({
-            content: 'Only the user themselves, an Administrator, or a Consigliere can link this user.',
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    const modal = new ModalBuilder()
-        .setCustomId(`rosterlinkmodal:${member.id}`)
-        .setTitle(`Link ${member.user.username}`.slice(0, 45));
-
-    const steamIdInput = new TextInputBuilder()
-        .setCustomId('steamid')
-        .setLabel('Steam ID')
-        .setPlaceholder('Enter your 17-digit Steam ID')
-        .setStyle(TextInputStyle.Short)
-        .setMinLength(17)
-        .setMaxLength(17)
-        .setRequired(true);
-
-    modal.addComponents(
-        new ActionRowBuilder().addComponents(steamIdInput)
-    );
-
-    await interaction.showModal(modal);
-}
-
-async function handleRosterLinkModal(interaction, targetId) {
-    const steamId = interaction.fields.getTextInputValue('steamid').trim();
-
-    if (!isValidSteamId(steamId)) {
-        await interaction.reply({
-            content: 'Steam ID must be exactly 17 digits.',
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-
-    if (!member) {
-        await interaction.reply({
-            content: 'That user could not be found in the server.',
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    if (member.id !== interaction.user.id && !isPrivileged(interaction.member)) {
-        await interaction.reply({
-            content: 'Only the user themselves, an Administrator, or a Consigliere can link this user.',
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    if (getLink(member.id)) {
-        await interaction.reply({
-            content: `${member} is already linked. Use \`/lookup\` to see the existing link.`,
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    const existingSteamLink = getLinkBySteamId(steamId);
-
-    if (existingSteamLink) {
-        await interaction.reply({
-            content: `That Steam ID is already linked to <@${existingSteamLink.discord_id}>.`,
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    db.prepare(`
-        INSERT INTO steam_links (
-            discord_id,
-            steam_id,
-            discord_username,
-            linked_at
-        )
-        VALUES (?, ?, ?, ?)
-    `).run(
-        member.id,
-        steamId,
-        member.user.username,
-        Date.now()
-    );
-
-    addAudit({
-        action: 'LINK',
-        actorId: interaction.user.id,
-        targetId: member.id,
-        newSteamId: steamId
-    });
-
-    db.prepare(`
-        DELETE FROM nickname_cleanup
-        WHERE steam_id = ?
-    `).run(steamId);
-
-    scheduleRelayPublish();
-
-    await interaction.reply({
-        content: `Linked ${member} to Steam ID \`${steamId}\`.`,
-        flags: MessageFlags.Ephemeral
-    });
-}
-
 async function handleUnlink(interaction) {
     const link = getLink(interaction.user.id);
 
@@ -1310,7 +1147,7 @@ async function handleUnlink(interaction) {
     });
 
     await interaction.reply({
-        content: 'Unlinked your Steam ID `' + "${link.steam_id}" + '`. Your Recruit/Gump role was left unchanged, so you can use the **Link** button on the roster to test linking again.',
+        content: `Unlinked your Steam ID \`${link.steam_id}\`. Your Recruit/Gump role was left unchanged.`,
         flags: MessageFlags.Ephemeral
     });
 
@@ -1679,16 +1516,6 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
             content: 'You need the Recruit, Gump, Administrator, or Consigliere role to use this command.',
             flags: MessageFlags.Ephemeral
         };
-
-        if (interaction.isModalSubmit()) {
-            const id = interaction.customId;
-
-            if (id.startsWith('rosterlinkmodal:')) {
-                const targetId = id.split(':')[1];
-                await handleRosterLinkModal(interaction, targetId);
-                return;
-            }
-        }
 
         if (interaction.isButton()) {
             await interaction.reply(response);
@@ -2109,6 +1936,170 @@ async function handlePrune(interaction) {
     scheduleRelayPublish();
 }
 
+
+async function sendSteamLinkPrompt(member) {
+    if (!member || member.user?.bot) return false;
+    if (!hasRosterRole(member)) return false;
+    if (getLink(member.id)) return false;
+
+    const alreadyNotified = db.prepare(\`
+        SELECT discord_id
+        FROM link_prompt_notifications
+        WHERE discord_id = ?
+    \`).get(member.id);
+
+    if (alreadyNotified) return false;
+
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('self-link-now')
+            .setLabel('Link Now')
+            .setEmoji('🔗')
+            .setStyle(ButtonStyle.Primary)
+    );
+
+    try {
+        await member.send({
+            content:
+                '⚠️ **You are not linked to Steam yet.**\\n\\n' +
+                'Please link your Steam account using the button below.\\n\\n' +
+                '**This is essential for being authorized on turrets.**',
+            components: [row]
+        });
+
+        db.prepare(\`
+            INSERT OR IGNORE INTO link_prompt_notifications (
+                discord_id,
+                notified_at
+            )
+            VALUES (?, ?)
+        \`).run(member.id, Date.now());
+
+        console.log(\`Sent Steam link prompt to \${member.user.username} (\${member.id}).\`);
+        return true;
+    } catch (error) {
+        console.warn(
+            \`Could not DM Steam link prompt to \${member.user.username} (\${member.id}): \${error.message || error}\`
+        );
+        return false;
+    }
+}
+
+async function handleSelfLinkButton(interaction) {
+    const modal = new ModalBuilder()
+        .setCustomId('self-link-modal')
+        .setTitle('Link Your Steam Account');
+
+    const steamIdInput = new TextInputBuilder()
+        .setCustomId('steamid')
+        .setLabel('Steam ID')
+        .setPlaceholder('Enter your 17-digit Steam ID')
+        .setStyle(TextInputStyle.Short)
+        .setMinLength(17)
+        .setMaxLength(17)
+        .setRequired(true);
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(steamIdInput)
+    );
+
+    await interaction.showModal(modal);
+}
+
+async function handleSelfLinkModal(interaction) {
+    const steamId = interaction.fields.getTextInputValue('steamid').trim();
+
+    if (!isValidSteamId(steamId)) {
+        await interaction.reply({
+            content: 'Steam ID must be exactly 17 digits.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    const guild = client.guilds.cache.get(config.guildId);
+
+    if (!guild) {
+        await interaction.reply({
+            content: 'The Discord server could not be found. Please try again later.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+
+    if (!member) {
+        await interaction.reply({
+            content: 'You could not be found in the Discord server.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    if (!canSelfLink(member)) {
+        await interaction.reply({
+            content: 'You must have the Recruit or Gump role to link your Steam account.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    const existingDiscordLink = getLink(member.id);
+
+    if (existingDiscordLink) {
+        await interaction.reply({
+            content: \`You are already linked to Steam ID \\\`\${existingDiscordLink.steam_id}\\\`.\`,
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    const existingSteamLink = getLinkBySteamId(steamId);
+
+    if (existingSteamLink) {
+        await interaction.reply({
+            content: \`That Steam ID is already linked to <@\${existingSteamLink.discord_id}>.\`,
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    db.prepare(\`
+        INSERT INTO steam_links (
+            discord_id,
+            steam_id,
+            discord_username,
+            linked_at
+        )
+        VALUES (?, ?, ?, ?)
+    \`).run(
+        member.id,
+        steamId,
+        member.user.username,
+        Date.now()
+    );
+
+    addAudit({
+        action: 'LINK',
+        actorId: interaction.user.id,
+        targetId: member.id,
+        newSteamId: steamId
+    });
+
+    db.prepare(\`
+        DELETE FROM nickname_cleanup
+        WHERE steam_id = ?
+    \`).run(steamId);
+
+    await interaction.reply({
+        content: \`✅ **Steam account linked successfully!**\\n\\nSteam ID: \\\`\${steamId}\\\`\`,
+        flags: MessageFlags.Ephemeral
+    });
+
+    scheduleRelayPublish();
+}
+
 // ============================================================
 // BUTTON HANDLING
 // ============================================================
@@ -2285,9 +2276,8 @@ client.on('interactionCreate', async interaction => {
         if (interaction.isModalSubmit()) {
             const id = interaction.customId;
 
-            if (id.startsWith('rosterlinkmodal:')) {
-                const targetId = id.split(':')[1];
-                await handleRosterLinkModal(interaction, targetId);
+            if (id === 'self-link-modal') {
+                await handleSelfLinkModal(interaction);
                 return;
             }
         }
@@ -2295,9 +2285,8 @@ client.on('interactionCreate', async interaction => {
         if (interaction.isButton()) {
             const id = interaction.customId;
 
-            if (id.startsWith('rosterlink:')) {
-                const targetId = id.split(':')[1];
-                await handleRosterLinkButton(interaction, targetId);
+            if (id === 'self-link-now') {
+                await handleSelfLinkButton(interaction);
                 return;
             }
 
@@ -2388,6 +2377,30 @@ client.on('interactionCreate', async interaction => {
         } catch {
             // Ignore secondary Discord errors.
         }
+    }
+});
+
+client.on('presenceUpdate', async (oldPresence, newPresence) => {
+    try {
+        const guild = newPresence.guild;
+
+        if (!guild || guild.id !== config.guildId) return;
+
+        const oldStatus = oldPresence?.status || 'offline';
+        const newStatus = newPresence.status || 'offline';
+
+        if (oldStatus !== 'offline' || newStatus === 'offline') return;
+
+        const member =
+            newPresence.member ||
+            guild.members.cache.get(newPresence.userId) ||
+            await guild.members.fetch(newPresence.userId).catch(() => null);
+
+        if (!member) return;
+
+        await sendSteamLinkPrompt(member);
+    } catch (error) {
+        console.error('Presence link-prompt error:', error);
     }
 });
 

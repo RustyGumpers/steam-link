@@ -469,9 +469,6 @@ async function buildNicknameSyncData() {
             `Discord member cache is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}); keeping the previous relay snapshot.`
         );
     }
-    if (!snapshot.complete) {
-        throw new Error('Discord member snapshot is incomplete; sync was not generated.');
-    }
 
     const members = snapshot.members;
     const set = [];
@@ -1235,14 +1232,6 @@ async function performRemove(interaction, targetId) {
         return;
     }
 
-    const removeLink = db.transaction(() => {
-        queueNicknameCleanup(link.steam_id, member.user.username, 'Steam link removed');
-        db.prepare(`DELETE FROM steam_links WHERE discord_id = ?`).run(targetId);
-        db.prepare(`DELETE FROM sync_tokens WHERE discord_id = ?`).run(targetId);
-        addAudit({ action: 'REMOVE', actorId: interaction.user.id, targetId, oldSteamId: link.steam_id });
-    });
-
-    removeLink();
     const rolesToRemove = [];
 
     if (member.roles.cache.has(ROLE_RECRUIT)) {
@@ -1253,9 +1242,21 @@ async function performRemove(interaction, targetId) {
         rolesToRemove.push(ROLE_GUMP);
     }
 
+    // Change Discord roles first. If Discord rejects the role operation,
+    // leave the database link intact so the two systems cannot silently
+    // become inconsistent.
     if (rolesToRemove.length) {
         await member.roles.remove(rolesToRemove);
     }
+
+    const removeLink = db.transaction(() => {
+        queueNicknameCleanup(link.steam_id, member.user.username, 'Steam link removed');
+        db.prepare(`DELETE FROM steam_links WHERE discord_id = ?`).run(targetId);
+        db.prepare(`DELETE FROM sync_tokens WHERE discord_id = ?`).run(targetId);
+        addAudit({ action: 'REMOVE', actorId: interaction.user.id, targetId, oldSteamId: link.steam_id });
+    });
+
+    removeLink();
 
     await interaction.editReply({
         content:
@@ -1436,6 +1437,13 @@ async function renderListInteraction(interaction, pageNumber = 0) {
         await interaction.reply({ content: 'You need the Recruit, Gump, Administrator, or Consigliere role to use this command.', flags: MessageFlags.Ephemeral });
         return;
     }
+
+    if (interaction.isButton()) {
+        await interaction.deferUpdate();
+    } else if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    }
+
     let snapshot = await fetchGuildMembers({ force: false });
     if (!snapshot.complete) snapshot = await fetchGuildMembers({ force: true });
     if (!snapshot.complete) throw new Error('Discord member snapshot is incomplete.');
@@ -1445,8 +1453,7 @@ async function renderListInteraction(interaction, pageNumber = 0) {
     const content = pages[page] + (pages.length > 1 ? `\n\n**Page ${page + 1} of ${pages.length}**` : '');
     const row = listPaginationRow(page, pages.length);
     const payload = { content: truncateDiscordContent(content), components: row ? [row] : [] };
-    if (interaction.isButton()) await interaction.update(payload);
-    else await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+    await interaction.editReply(payload);
 }
 
 async function handleList(interaction) {
@@ -1547,6 +1554,8 @@ async function handleStats(interaction) {
         return;
     }
 
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     let snapshot = await fetchGuildMembers({ force: false });
     if (!snapshot.complete) snapshot = await fetchGuildMembers({ force: true });
     const guild = snapshot.guild;
@@ -1596,7 +1605,7 @@ async function handleStats(interaction) {
         FROM nickname_cleanup
     `).get().count;
 
-    await interaction.reply({
+    await interaction.editReply({
         content:
             `**Roster / Steam Stats**\n\n` +
             `Gump members: **${gumpTotal}**\n` +
@@ -1633,14 +1642,19 @@ function buildAuditPages(rows) {
 }
 
 async function renderAuditInteraction(interaction, pageNumber = 0) {
+    if (interaction.isButton()) {
+        await interaction.deferUpdate();
+    } else if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    }
+
     const rows=db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?').all(MAX_AUDIT_ENTRIES);
     const pages=buildAuditPages(rows);
     const page=Math.max(0, Math.min(Number.isInteger(pageNumber) ? pageNumber : 0, pages.length-1));
     const content=pages[page] + (pages.length > 1 ? `\n\n**Page ${page+1} of ${pages.length}**` : '');
     const row=paginationRow('audit', page, pages.length);
     const payload={content:truncateDiscordContent(content),components:row?[row]:[]};
-    if (interaction.isButton()) await interaction.update(payload);
-    else await interaction.reply({...payload,flags:MessageFlags.Ephemeral});
+    await interaction.editReply(payload);
 }
 
 async function handleAudit(interaction) {
@@ -1807,6 +1821,8 @@ async function handlePrune(interaction) {
         return;
     }
 
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     const snapshot = await fetchGuildMembers({ force: true });
     const members = snapshot.members;
 
@@ -1856,12 +1872,11 @@ async function handlePrune(interaction) {
 
     transaction();
 
-    await interaction.reply({
+    await interaction.editReply({
         content:
             removed.length
                 ? `Pruned **${removed.length}** user(s). Their Steam IDs were added to the nickname cleanup queue.`
-                : 'No stale Steam links were found.',
-        flags: MessageFlags.Ephemeral
+                : 'No stale Steam links were found.'
     });
 
     scheduleRelayPublish();
@@ -2137,9 +2152,18 @@ client.once('clientReady', async () => {
         console.error('Failed to register slash commands:', error);
     }
 
-    await publishRelaySnapshot();
-    await scanOnlineMembersForLinkPrompts();
+    // Start the recurring relay timer immediately. Initial sync/prompt work
+    // is intentionally asynchronous so a slow guild member fetch cannot
+    // block the bot's normal event loop setup.
     setInterval(() => publishRelaySnapshot().catch(console.error), 60_000);
+
+    publishRelaySnapshot().catch(error => {
+        console.error('Initial relay snapshot failed:', error);
+    });
+
+    scanOnlineMembersForLinkPrompts().catch(error => {
+        console.error('Initial Steam link prompt scan failed:', error);
+    });
 });
 
 client.on('interactionCreate', async interaction => {

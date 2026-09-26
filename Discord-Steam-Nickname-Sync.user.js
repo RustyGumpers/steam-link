@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.2.0
+// @version      10.2.1
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -28,7 +28,9 @@
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV11';
     const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
+    const NICKNAME_FAILURES_KEY = 'discordSteamSyncNicknameFailuresV1';
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+    const NICKNAME_FAILURE_RETRY_MS = 5 * 60 * 1000;
     const AUTO_SCAN_RETRIES = 8;
     const AUTO_SCAN_RETRY_DELAY_MS = 5000;
     const POLL_INTERVAL_MS = 60000;
@@ -367,6 +369,40 @@
         writeStoredValue(FRIEND_REQUESTS_KEY, JSON.stringify(state));
     }
 
+    function readNicknameFailureState() {
+        try {
+            const raw = readStoredValue(NICKNAME_FAILURES_KEY, '{}');
+            const parsed = JSON.parse(raw || '{}');
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch {
+            return {};
+        }
+    }
+
+    function writeNicknameFailureState(state) {
+        writeStoredValue(NICKNAME_FAILURES_KEY, JSON.stringify(state));
+    }
+
+    function isNicknameFailureThrottled(steamId, force) {
+        if (force) return false;
+        const state = readNicknameFailureState();
+        const lastFailed = Number(state[steamId] || 0);
+        return lastFailed > 0 && Date.now() - lastFailed < NICKNAME_FAILURE_RETRY_MS;
+    }
+
+    function recordNicknameFailure(steamId) {
+        const state = readNicknameFailureState();
+        state[steamId] = Date.now();
+        writeNicknameFailureState(state);
+    }
+
+    function clearNicknameFailure(steamId) {
+        const state = readNicknameFailureState();
+        if (!(steamId in state)) return;
+        delete state[steamId];
+        writeNicknameFailureState(state);
+    }
+
     async function sendSteamFriendRequest(steamId) {
         const sessionID = getSessionId();
         if (!sessionID) throw new Error('Steam session ID was not found.');
@@ -580,21 +616,23 @@
                 .map(([steamId]) => steamId);
             const hasUnresolvedNames = unresolvedNames.length > 0;
             const hasMissing = missingFriends.length > 0 || hasUnresolvedNames;
-            const shouldUpdateMatching = force || completedSignature !== previousCompleted;
+            let shouldUpdateMatching = force || completedSignature !== previousCompleted;
 
             if (!force && !hasMissing && !shouldUpdateMatching) {
-                let localNicknameMismatch = false;
-
                 for (const [steamId, nickname] of completedEntries) {
                     const friendBlock = friends.get(steamId);
                     const localNickname = getSteamLocalNickname(friendBlock);
                     if (localNickname && localNickname !== nickname) {
-                        localNicknameMismatch = true;
+                        // The stored signature says the desired nickname was
+                        // previously completed, but Steam explicitly exposes a
+                        // different local nickname now. Treat that as a real
+                        // mismatch and queue the nickname for correction.
+                        shouldUpdateMatching = true;
                         break;
                     }
                 }
 
-                if (!localNicknameMismatch) {
+                if (!shouldUpdateMatching) {
                     setStatus('Already synchronized.');
                     return;
                 }
@@ -636,9 +674,15 @@
 
             let completed = 0;
             let failedNicknames = [];
+            let deferredNicknames = [];
 
             for (const [steamId, nickname] of entries) {
                 if (stopRequested) throw new Error('Sync stopped.');
+
+                if (isNicknameFailureThrottled(steamId, force)) {
+                    deferredNicknames.push(steamId);
+                    continue;
+                }
 
                 setStatus(
                     'Syncing nicknames…',
@@ -647,8 +691,10 @@
 
                 try {
                     await setSteamNickname(steamId, nickname);
+                    clearNicknameFailure(steamId);
                     completed++;
                 } catch {
+                    recordNicknameFailure(steamId);
                     failedNicknames.push(steamId);
                 }
 
@@ -673,10 +719,18 @@
                 );
             }
 
+            if (deferredNicknames.length && !failedNicknames.length && !unresolvedNames.length) {
+                setStatus(
+                    'Some nickname retries are temporarily delayed.',
+                    `${deferredNicknames.length} nickname(s) recently failed and will be retried automatically.`
+                );
+            }
+
             const fullySuccessful =
                 missingFriends.length === 0 &&
                 unresolvedNames.length === 0 &&
                 failedNicknames.length === 0 &&
+                deferredNicknames.length === 0 &&
                 entries.length === completedEntries.length;
 
             if (fullySuccessful) {
@@ -763,6 +817,7 @@
             }
 
             removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
+            removeStoredValue(NICKNAME_FAILURES_KEY);
 
             if (failed > 0) {
                 // Do not schedule automatic restoration when clearing itself
@@ -825,7 +880,6 @@
     }
 
     function setupToken() {
-        const current = getToken();
         const token = prompt('Paste your personal 64-character sync token generated by /sync-setup in Discord. Keep this token private.', '');
         if (token === null) return;
         const value = token.trim();

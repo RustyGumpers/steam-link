@@ -1942,11 +1942,9 @@ async function sendSteamLinkPrompt(member) {
     if (!hasRosterRole(member)) return false;
     if (getLink(member.id)) return false;
 
-    const alreadyNotified = db.prepare(\`
-        SELECT discord_id
-        FROM link_prompt_notifications
-        WHERE discord_id = ?
-    \`).get(member.id);
+    const alreadyNotified = db.prepare(
+        'SELECT discord_id FROM link_prompt_notifications WHERE discord_id = ?'
+    ).get(member.id);
 
     if (alreadyNotified) return false;
 
@@ -1961,25 +1959,21 @@ async function sendSteamLinkPrompt(member) {
     try {
         await member.send({
             content:
-                '⚠️ **You are not linked to Steam yet.**\\n\\n' +
-                'Please link your Steam account using the button below.\\n\\n' +
+                '⚠️ **You are not linked to Steam yet.**\n\n' +
+                'Please link your Steam account using the button below.\n\n' +
                 '**This is essential for being authorized on turrets.**',
             components: [row]
         });
 
-        db.prepare(\`
-            INSERT OR IGNORE INTO link_prompt_notifications (
-                discord_id,
-                notified_at
-            )
-            VALUES (?, ?)
-        \`).run(member.id, Date.now());
+        db.prepare(
+            'INSERT OR IGNORE INTO link_prompt_notifications (discord_id, notified_at) VALUES (?, ?)'
+        ).run(member.id, Date.now());
 
-        console.log(\`Sent Steam link prompt to \${member.user.username} (\${member.id}).\`);
+        console.log('Sent Steam link prompt to ' + member.user.username + ' (' + member.id + ').');
         return true;
     } catch (error) {
         console.warn(
-            \`Could not DM Steam link prompt to \${member.user.username} (\${member.id}): \${error.message || error}\`
+            'Could not DM Steam link prompt to ' + member.user.username + ' (' + member.id + '): ' + (error.message || error)
         );
         return false;
     }
@@ -2049,7 +2043,7 @@ async function handleSelfLinkModal(interaction) {
 
     if (existingDiscordLink) {
         await interaction.reply({
-            content: \`You are already linked to Steam ID \\\`\${existingDiscordLink.steam_id}\\\`.\`,
+            content: 'You are already linked to Steam ID `' + existingDiscordLink.steam_id + '`.',
             flags: MessageFlags.Ephemeral
         });
         return;
@@ -2059,21 +2053,15 @@ async function handleSelfLinkModal(interaction) {
 
     if (existingSteamLink) {
         await interaction.reply({
-            content: \`That Steam ID is already linked to <@\${existingSteamLink.discord_id}>.\`,
+            content: 'That Steam ID is already linked to <@' + existingSteamLink.discord_id + '>.',
             flags: MessageFlags.Ephemeral
         });
         return;
     }
 
-    db.prepare(\`
-        INSERT INTO steam_links (
-            discord_id,
-            steam_id,
-            discord_username,
-            linked_at
-        )
-        VALUES (?, ?, ?, ?)
-    \`).run(
+    db.prepare(
+        'INSERT INTO steam_links (discord_id, steam_id, discord_username, linked_at) VALUES (?, ?, ?, ?)'
+    ).run(
         member.id,
         steamId,
         member.user.username,
@@ -2087,19 +2075,17 @@ async function handleSelfLinkModal(interaction) {
         newSteamId: steamId
     });
 
-    db.prepare(\`
-        DELETE FROM nickname_cleanup
-        WHERE steam_id = ?
-    \`).run(steamId);
+    db.prepare(
+        'DELETE FROM nickname_cleanup WHERE steam_id = ?'
+    ).run(steamId);
 
     await interaction.reply({
-        content: \`✅ **Steam account linked successfully!**\\n\\nSteam ID: \\\`\${steamId}\\\`\`,
+        content: '✅ **Steam account linked successfully!**\n\nSteam ID: `' + steamId + '`',
         flags: MessageFlags.Ephemeral
     });
 
     scheduleRelayPublish();
 }
-
 // ============================================================
 // BUTTON HANDLING
 // ============================================================

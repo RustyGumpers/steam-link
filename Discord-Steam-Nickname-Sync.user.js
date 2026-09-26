@@ -566,16 +566,17 @@
                 for (const steamId of missingFriends) {
                     if (stopRequested) throw new Error('Sync stopped.');
 
+                    let result = 'throttled';
                     try {
-                        const result = await sendSteamFriendRequest(steamId);
+                        result = await sendSteamFriendRequest(steamId);
                         if (result === 'sent') requested++;
                     } catch {
                         requestFailures++;
                     }
 
-                    // Do not add the delay when this account is already in the
-                    // 24-hour cooldown; only actual Steam requests need spacing.
-                    if (Number(readFriendRequestState()[steamId] || 0) === 0) {
+                    // Space actual Steam requests apart. A throttled account
+                    // did not make a request, so it does not need the delay.
+                    if (result !== 'throttled' && !stopRequested) {
                         await sleep(FRIEND_REQUEST_MIN_INTERVAL_MS);
                     }
                 }

@@ -654,7 +654,16 @@
                 );
             }
         } catch (error) {
-            setStatus(error.message || 'Sync failed. No automatic nickname clearing was performed.');
+            // A user-initiated stop can happen after some nicknames have
+            // already been changed. Never leave the previous completed
+            // signature in place, or the next automatic run could incorrectly
+            // assume a force-sync was completed.
+            if (stopRequested) {
+                removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
+                setStatus('Sync stopped.', 'The completed signature was cleared so the next sync will retry all required nicknames.');
+            } else {
+                setStatus(error.message || 'Sync failed. No automatic nickname clearing was performed.');
+            }
         } finally {
             syncRunning = false;
             setButtonDisabled(false);

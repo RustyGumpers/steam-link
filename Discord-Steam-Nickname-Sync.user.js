@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.2.7
+// @version      10.2.8
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -580,9 +580,11 @@
         return new Promise((resolve, reject) => {
             let settled = false;
             let request = null;
+            let watchdog = null;
 
             const cleanup = () => {
                 if (request) activeRequestAborts.delete(request);
+                if (watchdog) clearTimeout(watchdog);
             };
 
             const finish = (fn, value) => {
@@ -590,6 +592,12 @@
                 settled = true;
                 cleanup();
                 fn(value);
+            };
+
+            const abortRequest = () => {
+                try {
+                    if (request?.abort) request.abort();
+                } catch {}
             };
 
             request = GM_xmlhttpRequest({
@@ -618,9 +626,19 @@
             });
 
             if (!settled && request?.abort) activeRequestAborts.add(request);
+
+            // Tampermonkey's native timeout should normally fire, but a hung
+            // request must never be allowed to freeze the entire nickname sync.
+            watchdog = setTimeout(() => {
+                if (settled) return;
+                abortRequest();
+                finish(
+                    reject,
+                    new Error(`Steam nickname update watchdog timed out for ${steamId} after ${REQUEST_TIMEOUT_MS / 1000}s.`)
+                );
+            }, REQUEST_TIMEOUT_MS + 1000);
         });
     }
-
     async function syncNicknames(force = false) {
         if (syncRunning) return;
         if (!acquireSyncLock(force)) {

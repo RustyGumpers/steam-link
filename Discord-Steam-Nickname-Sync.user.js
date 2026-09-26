@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.2.4
+// @version      10.2.5
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -34,14 +34,12 @@
     const NICKNAME_FAILURE_RETRY_MS = 5 * 60 * 1000;
     const AUTO_SCAN_RETRIES = 8;
     const AUTO_SCAN_RETRY_DELAY_MS = 5000;
-    const POLL_INTERVAL_MS = 60000;
     const REQUEST_TIMEOUT_MS = 15000;
     const MAX_NICKNAME_LENGTH = 32;
     const FRIEND_REQUEST_MIN_INTERVAL_MS = 1500;
 
     let stopRequested = false;
     let syncRunning = false;
-    let pollTimer = null;
     const activeRequestAborts = new Set();
 
     function readStoredValue(key, fallback = '') {
@@ -954,21 +952,12 @@
         setStatus(getToken() ? (isFriendsPage() ? 'Ready.' : 'Open Steam → Friends to sync.') : 'Set your personal sync token first.');
     }
 
-    function startPolling() {
-        clearInterval(pollTimer);
-        pollTimer = setInterval(() => {
-            if (document.hidden || !getToken() || !isFriendsPage() || syncRunning) return;
-            syncNicknames(false).catch(() => {});
-        }, POLL_INTERVAL_MS);
-    }
-
     GM_registerMenuCommand('Set Discord Steam Sync Token', setupToken);
     GM_registerMenuCommand('Set Custom Nickname Prefix', setupCustomPrefix);
     GM_registerMenuCommand('Sync All Nicknames', () => syncNicknames(true));
     GM_registerMenuCommand('Remove All Friend Nicknames', clearAllFriendNicknames);
 
     buildUI();
-    startPolling();
 
     setTimeout(() => {
         if (!getToken() || !isFriendsPage()) return;

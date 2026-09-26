@@ -34,7 +34,9 @@ let config = {
     settings: {
         listPageSize: envOr('LIST_PAGE_SIZE', 10),
         auditPageSize: envOr('AUDIT_PAGE_SIZE', 10),
-        maxAuditEntries: envOr('MAX_AUDIT_ENTRIES', 250)
+        maxAuditEntries: envOr('MAX_AUDIT_ENTRIES', 250),
+        linkPromptTimezone: envOr('LINK_PROMPT_TIMEZONE', process.env.TZ || 'UTC'),
+        backupRetention: envOr('BACKUP_RETENTION', 7)
     }
 };
 
@@ -135,6 +137,8 @@ function positiveInteger(value, fallback, max = Number.MAX_SAFE_INTEGER) {
 const PAGE_SIZE = positiveInteger(config.settings?.listPageSize, 10, 10);
 const AUDIT_PAGE_SIZE = positiveInteger(config.settings?.auditPageSize, 10, 50);
 const MAX_AUDIT_ENTRIES = positiveInteger(config.settings?.maxAuditEntries, 250, 5000);
+const BACKUP_RETENTION = positiveInteger(config.settings?.backupRetention, 7, 100);
+const DISCORD_SAFE_CONTENT_LIMIT = 1900;
 
 const requiredConfig = [
     ['DISCORD_GUILD_ID', config.guildId],
@@ -307,6 +311,11 @@ function getPage(items, page, pageSize) {
     };
 }
 
+function truncateDiscordContent(content, limit = DISCORD_SAFE_CONTENT_LIMIT) {
+    const text = String(content || '');
+    return text.length <= limit ? text : text.slice(0, Math.max(0, limit - 1)) + '…';
+}
+
 function paginationRow(prefix, page, totalPages) {
     const row = new ActionRowBuilder();
 
@@ -454,7 +463,12 @@ async function fetchGuildMembers(options = {}) {
 // ============================================================
 
 async function buildNicknameSyncData() {
-    const snapshot = await fetchGuildMembers({ force: true });
+    const snapshot = await fetchGuildMembers({ force: false });
+    if (!snapshot.complete) {
+        throw new Error(
+            `Discord member cache is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}); keeping the previous relay snapshot.`
+        );
+    }
     if (!snapshot.complete) {
         throw new Error('Discord member snapshot is incomplete; sync was not generated.');
     }
@@ -719,12 +733,8 @@ function getRosterMembersFromCache(roleId) {
 }
 
 async function getFreshRosterMembers(roleId) {
-    // Use the shared member-fetch cooldown. Normal Discord member events keep
-    // the cache current between full snapshots, avoiding repeated Gateway
-    // opcode-8 requests.
-    const snapshot = await fetchGuildMembers({
-        force: true
-    });
+    let snapshot = await fetchGuildMembers({ force: false });
+    if (!snapshot.complete) snapshot = await fetchGuildMembers({ force: true });
 
     if (!snapshot.complete) {
         throw new Error('Discord member snapshot is incomplete.');
@@ -1461,87 +1471,60 @@ async function handleEdit(interaction) {
     scheduleRelayPublish();
 }
 
-async function handleList(interaction) {
-    if (!canSelfLink(interaction.member) && !isPrivileged(interaction.member)) {
-        await interaction.reply({
-            content: 'You need the Recruit, Gump, Administrator, or Consigliere role to use this command.',
-            flags: MessageFlags.Ephemeral
-        });
-        return;
-    }
-
-    const rows = db.prepare(`
-        SELECT discord_id, steam_id
-        FROM steam_links
-        ORDER BY discord_id
-    `).all();
-
-    const snapshot = await fetchGuildMembers({ force: true });
-    const guild = snapshot.guild;
-    const members = snapshot.members;
-
-    const grouped = {
-        Gump: [],
-        Recruit: [],
-        Unassigned: []
-    };
-
+function buildListPages(rows, members) {
+    const groups = { Gump: [], Recruit: [], Unassigned: [] };
     for (const row of rows) {
         const member = members.get(row.discord_id);
-
-        if (!member) {
-            grouped.Unassigned.push({
-                member: null,
-                steamId: row.steam_id,
-                discordId: row.discord_id
-            });
-            continue;
-        }
-
-        const role = getRosterRole(member) || 'Unassigned';
-
-        grouped[role].push({
-            member,
-            steamId: row.steam_id,
-            discordId: row.discord_id
-        });
+        const role = member ? (getRosterRole(member) || 'Unassigned') : 'Unassigned';
+        groups[role].push({ member, steamId: row.steam_id, discordId: row.discord_id });
     }
-
-    const sections = [];
-
+    const lines = [];
     for (const role of ['Gump', 'Recruit', 'Unassigned']) {
-        const values = grouped[role];
-
-        sections.push(
-            `**${role} (${values.length})**`
-        );
-
-        if (!values.length) {
-            sections.push('None.');
-            continue;
-        }
-
-        sections.push(
-            values
-                .map(item =>
-                    item.member
-                        ? `• ${item.member} — \`${item.steamId}\``
-                        : `• ⚠️ <@${item.discordId}> — \`${item.steamId}\``
-                )
-                .join('\n')
-        );
+        const values = groups[role];
+        lines.push(`**${role} (${values.length})**`);
+        if (!values.length) { lines.push('None.'); continue; }
+        for (const item of values) lines.push(item.member ? `• ${item.member} — \`${item.steamId}\`` : `• ⚠️ <@${item.discordId}> — \`${item.steamId}\``);
     }
-
-    const text = sections.join('\n\n');
-
-    await interaction.reply({
-        content:
-            text.length > 2000
-                ? text.slice(0, 1990) + '\n…'
-                : text,
-        flags: MessageFlags.Ephemeral
-    });
+    const pages=[]; let current='';
+    for (const line of lines) {
+        const candidate=current ? `${current}\n\n${line}` : line;
+        if (candidate.length <= DISCORD_SAFE_CONTENT_LIMIT) { current=candidate; continue; }
+        if (current) pages.push(current);
+        current=truncateDiscordContent(line);
+    }
+    if (current) pages.push(current);
+    return pages.length ? pages : ['No Steam links found.'];
 }
+
+function listPaginationRow(page, totalPages) {
+    const row = new ActionRowBuilder();
+    if (page > 0) row.addComponents(new ButtonBuilder().setCustomId(`list:page:${page - 1}`).setLabel('Previous').setStyle(ButtonStyle.Secondary));
+    if (page < totalPages - 1) row.addComponents(new ButtonBuilder().setCustomId(`list:page:${page + 1}`).setLabel('Next').setStyle(ButtonStyle.Secondary));
+    return row.components.length ? row : null;
+}
+
+async function renderListInteraction(interaction, pageNumber = 0) {
+    if (!canSelfLink(interaction.member) && !isPrivileged(interaction.member)) {
+        await interaction.reply({ content: 'You need the Recruit, Gump, Administrator, or Consigliere role to use this command.', flags: MessageFlags.Ephemeral });
+        return;
+    }
+    let snapshot = await fetchGuildMembers({ force: false });
+    if (!snapshot.complete) snapshot = await fetchGuildMembers({ force: true });
+    if (!snapshot.complete) throw new Error('Discord member snapshot is incomplete.');
+    const rows = db.prepare('SELECT discord_id, steam_id FROM steam_links ORDER BY discord_id').all();
+    const pages = buildListPages(rows, snapshot.members);
+    const page = Math.max(0, Math.min(Number.isInteger(pageNumber) ? pageNumber : 0, pages.length - 1));
+    const content = pages[page] + (pages.length > 1 ? `\n\n**Page ${page + 1} of ${pages.length}**` : '');
+    const row = listPaginationRow(page, pages.length);
+    const payload = { content: truncateDiscordContent(content), components: row ? [row] : [] };
+    if (interaction.isButton()) await interaction.update(payload);
+    else await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+}
+
+async function handleList(interaction) {
+    await renderListInteraction(interaction, 0);
+}
+
 
 async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'all', pageNumber = 0) {
     const allowed =
@@ -1636,7 +1619,8 @@ async function handleStats(interaction) {
         return;
     }
 
-    const snapshot = await fetchGuildMembers({ force: true });
+    let snapshot = await fetchGuildMembers({ force: false });
+    if (!snapshot.complete) snapshot = await fetchGuildMembers({ force: true });
     const guild = snapshot.guild;
     const members = snapshot.members;
 
@@ -1698,66 +1682,47 @@ async function handleStats(interaction) {
     });
 }
 
+function formatAuditEntry(row) {
+    const when = `<t:${Math.floor(row.timestamp / 1000)}:f>`;
+    let details = `**${row.action}** — <@${row.target_id}> — ${when}`;
+    if (row.old_steam_id) details += `\nOld: \`${row.old_steam_id}\``;
+    if (row.new_steam_id) details += `\nNew: \`${row.new_steam_id}\``;
+    if (row.details) details += `\n${row.details}`;
+    return truncateDiscordContent(details);
+}
+
+function buildAuditPages(rows) {
+    const pages=[]; let current='';
+    for (const row of rows) {
+        const entry=formatAuditEntry(row);
+        const candidate=current ? `${current}\n\n${entry}` : entry;
+        if (candidate.length <= DISCORD_SAFE_CONTENT_LIMIT) { current=candidate; continue; }
+        if (current) pages.push(current);
+        current=entry;
+    }
+    if (current) pages.push(current);
+    return pages.length ? pages : ['No audit entries.'];
+}
+
+async function renderAuditInteraction(interaction, pageNumber = 0) {
+    const rows=db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?').all(MAX_AUDIT_ENTRIES);
+    const pages=buildAuditPages(rows);
+    const page=Math.max(0, Math.min(Number.isInteger(pageNumber) ? pageNumber : 0, pages.length-1));
+    const content=pages[page] + (pages.length > 1 ? `\n\n**Page ${page+1} of ${pages.length}**` : '');
+    const row=paginationRow('audit', page, pages.length);
+    const payload={content:truncateDiscordContent(content),components:row?[row]:[]};
+    if (interaction.isButton()) await interaction.update(payload);
+    else await interaction.reply({...payload,flags:MessageFlags.Ephemeral});
+}
+
 async function handleAudit(interaction) {
     if (!isPrivileged(interaction.member)) {
-        await interaction.reply({
-            content:
-                'Only an Administrator or Consigliere can view the audit log.',
-            flags: MessageFlags.Ephemeral
-        });
+        await interaction.reply({ content: 'Only an Administrator or Consigliere can view the audit log.', flags: MessageFlags.Ephemeral });
         return;
     }
-
-    const rows = db.prepare(`
-        SELECT *
-        FROM audit_log
-        ORDER BY id DESC
-        LIMIT ?
-    `).all(MAX_AUDIT_ENTRIES);
-
-    const page = getPage(rows, 0, AUDIT_PAGE_SIZE);
-
-    const content = page.items.length
-        ? page.items.map(row => {
-            const when = `<t:${Math.floor(row.timestamp / 1000)}:f>`;
-
-            let details =
-                `**${row.action}** — <@${row.target_id}> — ${when}`;
-
-            if (row.old_steam_id) {
-                details += `\nOld: \`${row.old_steam_id}\``;
-            }
-
-            if (row.new_steam_id) {
-                details += `\nNew: \`${row.new_steam_id}\``;
-            }
-
-            if (row.details) {
-                details += `\n${row.details}`;
-            }
-
-            return details;
-        }).join('\n\n')
-        : 'No audit entries.';
-
-    const components = [];
-
-    const row = paginationRow(
-        'audit',
-        page.page,
-        page.totalPages
-    );
-
-    if (row) {
-        components.push(row);
-    }
-
-    await interaction.reply({
-        content,
-        components,
-        flags: MessageFlags.Ephemeral
-    });
+    await renderAuditInteraction(interaction, 0);
 }
+
 
 async function handleExport(interaction) {
     if (!isPrivileged(interaction.member)) {
@@ -1838,6 +1803,18 @@ async function handleBackup(interaction) {
 
     await db.backup(backupPath);
 
+    const backupFiles = fs.readdirSync(backupDir)
+        .filter(name => /^database-\d+\.sqlite$/.test(name))
+        .sort((a, b) => Number(b.match(/^database-(\d+)\.sqlite$/)?.[1] || 0) - Number(a.match(/^database-(\d+)\.sqlite$/)?.[1] || 0));
+
+    for (const oldBackup of backupFiles.slice(BACKUP_RETENTION)) {
+        try {
+            fs.unlinkSync(path.join(backupDir, oldBackup));
+        } catch (error) {
+            console.warn(`Could not remove old backup ${oldBackup}: ${error.message || error}`);
+        }
+    }
+
     await interaction.reply({
         content:
             `Database backup created:\n\`${path.relative(path.dirname(databasePath), backupPath)}\``,
@@ -1867,15 +1844,19 @@ async function handleSyncSetup(interaction) {
     const token = generateSyncToken();
     const tokenHash = sha256(token);
 
-    db.prepare(`
-        INSERT INTO sync_tokens (discord_id, steam_id, token_hash, created_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(discord_id)
-        DO UPDATE SET
-            steam_id = excluded.steam_id,
-            token_hash = excluded.token_hash,
-            created_at = excluded.created_at
-    `).run(interaction.user.id, existing.steam_id, tokenHash, Date.now());
+    const saveSyncToken = db.transaction(() => {
+        db.prepare(`
+            INSERT INTO sync_tokens (discord_id, steam_id, token_hash, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(discord_id)
+            DO UPDATE SET
+                steam_id = excluded.steam_id,
+                token_hash = excluded.token_hash,
+                created_at = excluded.created_at
+        `).run(interaction.user.id, existing.steam_id, tokenHash, Date.now());
+    });
+
+    saveSyncToken();
 
     scheduleRelayPublish();
 
@@ -1961,8 +1942,22 @@ async function handlePrune(interaction) {
 
 const linkPromptInFlight = new Set();
 
-function getPromptDay() {
-    return new Date().toISOString().slice(0, 10);
+function getPromptDay(timestamp = Date.now()) {
+    try {
+        return new Intl.DateTimeFormat('en-CA', {
+            timeZone: config.settings.linkPromptTimezone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        }).format(new Date(timestamp));
+    } catch {
+        return new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'UTC',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        }).format(new Date(timestamp));
+    }
 }
 
 function wasPromptedToday(discordId) {
@@ -1972,7 +1967,7 @@ function wasPromptedToday(discordId) {
 
     if (!record) return false;
 
-    return new Date(record.notified_at).toISOString().slice(0, 10) === getPromptDay();
+    return getPromptDay(record.notified_at) === getPromptDay();
 }
 
 async function sendSteamLinkPrompt(member) {
@@ -2100,33 +2095,37 @@ async function handleSelfLinkModal(interaction) {
         return;
     }
 
-    db.prepare(
-        'INSERT INTO steam_links (discord_id, steam_id, discord_username, linked_at) VALUES (?, ?, ?, ?)'
-    ).run(
-        member.id,
-        steamId,
-        member.user.username,
-        Date.now()
-    );
+    const saveSelfLink = db.transaction(() => {
+        db.prepare(
+            'INSERT INTO steam_links (discord_id, steam_id, discord_username, linked_at) VALUES (?, ?, ?, ?)'
+        ).run(
+            member.id,
+            steamId,
+            member.user.username,
+            Date.now()
+        );
 
-    addAudit({
-        action: 'LINK',
-        actorId: interaction.user.id,
-        targetId: member.id,
-        newSteamId: steamId
+        addAudit({
+            action: 'LINK',
+            actorId: interaction.user.id,
+            targetId: member.id,
+            newSteamId: steamId
+        });
+
+        db.prepare(
+            'DELETE FROM nickname_cleanup WHERE steam_id = ?'
+        ).run(steamId);
+
+        db.prepare(
+            'DELETE FROM link_prompt_notifications WHERE discord_id = ?'
+        ).run(member.id);
+
+        db.prepare(
+            'UPDATE sync_tokens SET steam_id = ? WHERE discord_id = ?'
+        ).run(steamId, member.id);
     });
 
-    db.prepare(
-        'DELETE FROM nickname_cleanup WHERE steam_id = ?'
-    ).run(steamId);
-
-    db.prepare(
-        'DELETE FROM link_prompt_notifications WHERE discord_id = ?'
-    ).run(member.id);
-
-    db.prepare(
-        'UPDATE sync_tokens SET steam_id = ? WHERE discord_id = ?'
-    ).run(steamId, member.id);
+    saveSelfLink();
 
     await interaction.reply({
         content: '✅ **Steam account linked successfully!**\n\nSteam ID: `' + steamId + '`',
@@ -2154,55 +2153,9 @@ async function handleListPage(interaction, type, filter, pageNumber) {
 }
 
 async function handleAuditPage(interaction, pageNumber) {
-    const rows = db.prepare(`
-        SELECT *
-        FROM audit_log
-        ORDER BY id DESC
-        LIMIT ?
-    `).all(MAX_AUDIT_ENTRIES);
-
-    const page = getPage(rows, pageNumber, AUDIT_PAGE_SIZE);
-
-    const content = page.items.length
-        ? page.items.map(row => {
-            const when = `<t:${Math.floor(row.timestamp / 1000)}:f>`;
-
-            let details =
-                `**${row.action}** — <@${row.target_id}> — ${when}`;
-
-            if (row.old_steam_id) {
-                details += `\nOld: \`${row.old_steam_id}\``;
-            }
-
-            if (row.new_steam_id) {
-                details += `\nNew: \`${row.new_steam_id}\``;
-            }
-
-            if (row.details) {
-                details += `\n${row.details}`;
-            }
-
-            return details;
-        }).join('\n\n')
-        : 'No audit entries.';
-
-    const components = [];
-
-    const row = paginationRow(
-        'audit',
-        page.page,
-        page.totalPages
-    );
-
-    if (row) {
-        components.push(row);
-    }
-
-    await interaction.update({
-        content,
-        components
-    });
+    await renderAuditInteraction(interaction, pageNumber);
 }
+
 
 // ============================================================
 // DISCORD EVENTS
@@ -2210,9 +2163,11 @@ async function handleAuditPage(interaction, pageNumber) {
 
 async function scanOnlineMembersForLinkPrompts() {
     try {
-        const snapshot = await fetchGuildMembers({ force: true });
+        const snapshot = await fetchGuildMembers({ force: false });
         if (!snapshot.complete) {
-            console.warn('Skipping online Steam link prompt scan because the member snapshot is incomplete.');
+            console.warn(
+                `Skipping startup Steam link prompt scan because the member cache is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}). Presence events will handle members as they come online.`
+            );
             return;
         }
 
@@ -2407,6 +2362,12 @@ client.on('interactionCreate', async interaction => {
                     filter,
                     0
                 );
+                return;
+            }
+
+            if (id.startsWith('list:page:')) {
+                const page = Number(id.split(':')[2]);
+                await renderListInteraction(interaction, Number.isFinite(page) ? page : 0);
                 return;
             }
 

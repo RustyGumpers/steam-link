@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.9
+// @version      10.2.0
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -31,7 +31,7 @@
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
     const AUTO_SCAN_RETRIES = 8;
     const AUTO_SCAN_RETRY_DELAY_MS = 5000;
-    const POLL_INTERVAL_MS = 15000;
+    const POLL_INTERVAL_MS = 60000;
     const REQUEST_TIMEOUT_MS = 15000;
     const MAX_NICKNAME_LENGTH = 32;
     const FRIEND_REQUEST_MIN_INTERVAL_MS = 1500;
@@ -86,9 +86,6 @@
     }
 
     function getSteamId() {
-        const profileMatch = location.pathname.match(/^\/profiles\/(\d{17})\/friends\/?$/);
-        if (profileMatch) return profileMatch[1];
-
         if (/^\d{17}$/.test(String(window.g_steamID || ''))) {
             return String(window.g_steamID);
         }
@@ -239,6 +236,27 @@
         return '';
     }
 
+    function getSteamLocalNickname(friendBlock) {
+        if (!friendBlock) return '';
+
+        // Steam does not expose local nicknames consistently across all
+        // Friends-page layouts. Use only explicit nickname attributes/elements;
+        // never guess from the persona/display name.
+        const explicit = friendBlock.querySelector(
+            '[data-nickname], .friend_block_content [data-nickname], ' +
+            '.friend_block_content .friend_block_nickname, ' +
+            '.friend_block_content .nickname'
+        );
+        if (!explicit) return '';
+
+        return trimNickname(
+            explicit.getAttribute('data-nickname') ||
+            explicit.getAttribute('title') ||
+            explicit.textContent ||
+            ''
+        );
+    }
+
     function getSteamDisplayName(friendBlock) {
         if (!friendBlock) return '';
 
@@ -324,9 +342,9 @@
             const friends = getFriendBlocks();
             if (friends.size > 0) return friends;
 
-            // An empty Steam friends list is a valid state. Do not make users
-            // wait through all retry attempts when Steam has rendered the
-            // friends-list container/empty state.
+            // Empty-state text is the definitive zero-friend case. If Steam
+            // has not rendered either friend entries or an explicit empty
+            // state yet, keep waiting rather than guessing.
             if (isSteamFriendListRendered()) return friends;
 
             setStatus('Waiting for Steam friends to finish loading…', `Scan ${attempt}/${AUTO_SCAN_RETRIES}`);
@@ -358,6 +376,7 @@
         if (Date.now() - last < FRIEND_REQUEST_COOLDOWN_MS) return 'throttled';
 
         return new Promise((resolve, reject) => {
+            let settled = false;
             let request = null;
 
             const cleanup = () => {
@@ -365,8 +384,16 @@
             };
 
             const finish = (fn, value) => {
+                if (settled) return;
+                settled = true;
                 cleanup();
                 fn(value);
+            };
+
+            const recordConfirmedCooldown = result => {
+                state[steamId] = Date.now();
+                writeFriendRequestState(state);
+                finish(resolve, result);
             };
 
             request = GM_xmlhttpRequest({
@@ -376,44 +403,46 @@
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
                 data: `sessionID=${encodeURIComponent(sessionID)}&steamid=${encodeURIComponent(steamId)}&accept_invite=0`,
                 onload: response => {
-                    const text = String(response.responseText || '').toLowerCase();
+                    const responseText = String(response.responseText || '');
+                    const text = responseText.toLowerCase();
                     let data = null;
                     try {
-                        data = JSON.parse(response.responseText || '{}');
+                        data = JSON.parse(responseText || '{}');
                     } catch {}
 
+                    const invited = Array.isArray(data?.invited)
+                        ? data.invited.map(value => String(value))
+                        : [];
+                    const sentSuccessfully =
+                        Number(data?.success) === 1 &&
+                        invited.includes(String(steamId));
+
+                    // Only recognize narrowly worded states that indicate an
+                    // existing friendship/request. Never treat the generic
+                    // word "request" as confirmation.
+                    const explicitlyPending =
+                        /already\s+(?:a\s+)?friend/.test(text) ||
+                        /already\s+(?:sent|pending)/.test(text) ||
+                        /friend\s+request[^.\n]*pending/.test(text) ||
+                        /pending[^.\n]*friend\s+request/.test(text) ||
+                        /invitation[^.\n]*pending/.test(text);
+
                     if (response.status < 200 || response.status >= 300) {
-                        if (/already|pending|request/.test(text)) {
-                            state[steamId] = Date.now();
-                            writeFriendRequestState(state);
-                            finish(resolve, 'pending');
+                        if (explicitlyPending) {
+                            recordConfirmedCooldown('pending');
                             return;
                         }
                         finish(reject, new Error(`Steam friend request failed for ${steamId}.`));
                         return;
                     }
 
-                    // Steam's AddFriendAjax success response normally includes
-                    // success: 1 and the invited Steam ID. Only persist the
-                    // 24-hour cooldown after Steam actually reports success or
-                    // an explicit already/pending state.
-                    const invited = Array.isArray(data?.invited)
-                        ? data.invited.map(value => String(value))
-                        : [];
-                    const sentSuccessfully = Number(data?.success) === 1 && invited.includes(String(steamId));
-                    const explicitlyPending = /already|pending|request/.test(text);
-
                     if (sentSuccessfully) {
-                        state[steamId] = Date.now();
-                        writeFriendRequestState(state);
-                        finish(resolve, 'sent');
+                        recordConfirmedCooldown('sent');
                         return;
                     }
 
                     if (explicitlyPending) {
-                        state[steamId] = Date.now();
-                        writeFriendRequestState(state);
-                        finish(resolve, 'pending');
+                        recordConfirmedCooldown('pending');
                         return;
                     }
 
@@ -424,7 +453,7 @@
                 ontimeout: () => finish(reject, new Error(`Steam friend request timed out for ${steamId}.`))
             });
 
-            if (request?.abort) activeRequestAborts.add(request);
+            if (!settled && request?.abort) activeRequestAborts.add(request);
         });
     }
 
@@ -433,6 +462,7 @@
         if (!sessionID) throw new Error('Steam session ID was not found.');
 
         return new Promise((resolve, reject) => {
+            let settled = false;
             let request = null;
 
             const cleanup = () => {
@@ -440,6 +470,8 @@
             };
 
             const finish = (fn, value) => {
+                if (settled) return;
+                settled = true;
                 cleanup();
                 fn(value);
             };
@@ -452,17 +484,17 @@
                 data: `nickname=${encodeURIComponent(trimNickname(nickname))}&sessionid=${encodeURIComponent(sessionID)}`,
                 onload: response => {
                     if (response.status < 200 || response.status >= 300) {
-                        reject(new Error(`Steam nickname update failed for ${steamId} (HTTP ${response.status}).`));
+                        finish(reject, new Error(`Steam nickname update failed for ${steamId} (HTTP ${response.status}).`));
                         return;
                     }
                     try {
                         const data = JSON.parse(response.responseText || '{}');
                         if (Number(data.success) !== 1) {
-                            reject(new Error(`Steam nickname update failed for ${steamId}.`));
+                            finish(reject, new Error(`Steam nickname update failed for ${steamId}.`));
                             return;
                         }
                     } catch {
-                        reject(new Error(`Steam nickname update returned invalid data for ${steamId}.`));
+                        finish(reject, new Error(`Steam nickname update returned invalid data for ${steamId}.`));
                         return;
                     }
                     finish(resolve);
@@ -472,7 +504,7 @@
                 ontimeout: () => finish(reject, new Error(`Steam nickname update timed out for ${steamId}.`))
             });
 
-            if (request?.abort) activeRequestAborts.add(request);
+            if (!settled && request?.abort) activeRequestAborts.add(request);
         });
     }
 
@@ -551,8 +583,21 @@
             const shouldUpdateMatching = force || completedSignature !== previousCompleted;
 
             if (!force && !hasMissing && !shouldUpdateMatching) {
-                setStatus('Already synchronized.');
-                return;
+                let localNicknameMismatch = false;
+
+                for (const [steamId, nickname] of completedEntries) {
+                    const friendBlock = friends.get(steamId);
+                    const localNickname = getSteamLocalNickname(friendBlock);
+                    if (localNickname && localNickname !== nickname) {
+                        localNicknameMismatch = true;
+                        break;
+                    }
+                }
+
+                if (!localNicknameMismatch) {
+                    setStatus('Already synchronized.');
+                    return;
+                }
             }
 
             const entries = shouldUpdateMatching
@@ -771,7 +816,7 @@
 
     function setupToken() {
         const current = getToken();
-        const token = prompt('Paste the personal token generated by /sync-setup in Discord.', current);
+        const token = prompt('Paste your personal 64-character sync token generated by /sync-setup in Discord. Keep this token private.', '');
         if (token === null) return;
         const value = token.trim();
         if (!/^[a-f0-9]{64}$/i.test(value)) {

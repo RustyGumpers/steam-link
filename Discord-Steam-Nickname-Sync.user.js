@@ -24,6 +24,7 @@
 
     const SYNC_API_URL = 'https://steam-link-production.up.railway.app';
     const TOKEN_KEY = 'discordSteamSyncToken';
+    const CUSTOM_PREFIX_KEY = 'discordSteamSyncCustomPrefixV1';
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV10';
     const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
@@ -62,6 +63,20 @@
 
     function getToken() {
         return String(readStoredValue(TOKEN_KEY, '') || '').trim();
+    }
+
+    function getCustomPrefix() {
+        return trimNickname(readStoredValue(CUSTOM_PREFIX_KEY, '') || '');
+    }
+
+    function applyCustomPrefix(nickname) {
+        const base = trimNickname(nickname);
+        const prefix = getCustomPrefix();
+        if (!prefix) return base;
+
+        // Replace the built-in role prefix when one is present.
+        const withoutBuiltInPrefix = base.replace(/^(?:Gump|Recruit)\s+/i, '');
+        return trimNickname(`${prefix} ${withoutBuiltInPrefix}`);
     }
 
     function trimNickname(value) {
@@ -381,7 +396,7 @@
                 const steamId = getStateSteamId(state);
                 const nickname = getStateNickname(state);
                 if (!steamId || !nickname) continue;
-                desired.set(steamId, nickname);
+                desired.set(steamId, applyCustomPrefix(nickname));
             }
 
             const matching = [...desired.keys()].filter(steamId => steamId !== currentSteamId && friends.has(steamId));
@@ -453,19 +468,42 @@
         setButtonDisabled(true);
 
         try {
-            const friends = await scanFriends();
+            const currentSteamId = getSteamId();
+            if (!currentSteamId) {
+                throw new Error('Could not determine your Steam ID. Open Steam → Friends and try again.');
+            }
+
+            const scannedFriends = await scanFriends();
+
+            // Only process valid 17-digit Steam IDs and NEVER modify the logged-in user's own nickname.
+            const friends = new Map(
+                [...scannedFriends.entries()].filter(([steamId]) => {
+                    const id = String(steamId || '').trim();
+                    return /^\d{17}$/.test(id) && id !== currentSteamId;
+                })
+            );
+
             let completed = 0;
+            let failed = 0;
             for (const steamId of friends.keys()) {
                 if (stopRequested) throw new Error('Sync stopped.');
                 completed++;
-                setStatus('Removing friend nicknames…', `Processing ${completed} / ${friends.size}`);
-                await setSteamNickname(steamId, '');
+                setStatus(
+                    'Removing friend nicknames…',
+                    `Processing ${completed} / ${friends.size}${failed ? ` — ${failed} failed` : ''}`
+                );
+                try {
+                    await setSteamNickname(steamId, '');
+                } catch (error) {
+                    failed++;
+                }
                 await sleep(500);
             }
             removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
             writeStoredValue(RESYNC_AFTER_CLEAR_KEY, '1');
+            const successCount = friends.size - failed;
             setStatus(
-                `Removed local nicknames from ${friends.size} friend(s).`,
+                `Removed local nicknames from ${successCount} friend(s).${failed ? ` ${failed} friend(s) could not be updated.` : ''}`,
                 'The page will automatically refresh and restore the Discord nicknames.'
             );
             await sleep(2500);
@@ -476,6 +514,28 @@
             syncRunning = false;
             setButtonDisabled(false);
         }
+    }
+
+    function setupCustomPrefix() {
+        const current = getCustomPrefix();
+        const value = prompt(
+            'Enter your custom Steam nickname prefix.\n\n' +
+            'Example: Family\n\n' +
+            'Leave blank to use the Discord Gump/Recruit prefix.',
+            current
+        );
+        if (value === null) return;
+
+        const prefix = trimNickname(value);
+        writeStoredValue(CUSTOM_PREFIX_KEY, prefix);
+
+        if (prefix) {
+            setStatus(`Custom prefix saved: ${prefix}`, 'Syncing nicknames with your custom prefix…');
+        } else {
+            setStatus('Custom prefix cleared.', 'Restoring the Discord Gump/Recruit prefixes…');
+        }
+
+        syncNicknames(true).catch(error => setStatus(error.message || 'Custom prefix sync failed.'));
     }
 
     function setupToken() {
@@ -519,6 +579,7 @@
             <div id="discord-steam-sync-body">
                 <button id="discord-steam-sync-button">🔄 Sync All Nicknames</button>
                 <button id="discord-steam-sync-setup">🔐 Set Sync Token</button>
+                <button id="discord-steam-sync-prefix">🏷️ Set Custom Prefix</button>
                 <button id="discord-steam-sync-clear-friends">🧹 Remove All Friend Nicknames</button>
                 <button id="discord-steam-sync-stop">🛑 Stop Current Sync</button>
                 <div id="discord-steam-sync-status"></div>
@@ -530,6 +591,7 @@
         panel.querySelector('#discord-steam-sync-close').addEventListener('click', () => panel.remove());
         panel.querySelector('#discord-steam-sync-button').addEventListener('click', () => syncNicknames(true));
         panel.querySelector('#discord-steam-sync-setup').addEventListener('click', setupToken);
+        panel.querySelector('#discord-steam-sync-prefix').addEventListener('click', setupCustomPrefix);
         panel.querySelector('#discord-steam-sync-clear-friends').addEventListener('click', clearAllFriendNicknames);
         panel.querySelector('#discord-steam-sync-stop').addEventListener('click', () => {
             stopRequested = true;
@@ -548,6 +610,7 @@
     }
 
     GM_registerMenuCommand('Set Discord Steam Sync Token', setupToken);
+    GM_registerMenuCommand('Set Custom Nickname Prefix', setupCustomPrefix);
     GM_registerMenuCommand('Sync All Nicknames', () => syncNicknames(true));
     GM_registerMenuCommand('Remove All Friend Nicknames', clearAllFriendNicknames);
 

@@ -7,6 +7,9 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
+    ModalBuilder,
+    TextInputBuilder,
+    TextInputStyle,
     MessageFlags
 } = require('discord.js');
 
@@ -779,6 +782,46 @@ function rosterPaginationRow(prefix, filter, page, totalPages) {
     return buttons.length ? new ActionRowBuilder().addComponents(buttons) : null;
 }
 
+function rosterLinkRows(members) {
+    const unlinked = members.filter(member => !getLink(member.id));
+    const rows = [];
+
+    for (let i = 0; i < unlinked.length; i += 5) {
+        const buttons = unlinked.slice(i, i + 5).map(member =>
+            new ButtonBuilder()
+                .setCustomId(`rosterlink:${member.id}`)
+                .setLabel(`Link ${member.user.username}`.slice(0, 80))
+                .setStyle(ButtonStyle.Success)
+        );
+
+        if (buttons.length) {
+            rows.push(new ActionRowBuilder().addComponents(buttons));
+        }
+    }
+
+    return rows;
+}
+
+function buildRosterComponents(prefix, filter, page) {
+    const components = [];
+
+    const pagination = rosterPaginationRow(
+        prefix,
+        filter,
+        page.page,
+        page.totalPages
+    );
+
+    if (pagination) {
+        components.push(pagination);
+    }
+
+    components.push(rosterFilterRow(prefix, filter));
+    components.push(...rosterLinkRows(page.items));
+
+    return components;
+}
+
 function formatRosterLines(members, offset = 0) {
     if (!members.length) {
         return 'No members match this filter.';
@@ -857,15 +900,7 @@ async function refreshRosterInteraction(
             'updated'
         );
 
-        const components = [];
-        const pagination = rosterPaginationRow(
-            prefix,
-            filter,
-            page.page,
-            page.totalPages
-        );
-        if (pagination) components.push(pagination);
-        components.push(rosterFilterRow(prefix, filter));
+        const components = buildRosterComponents(prefix, filter, page);
 
         await interaction.editReply({
             content: content.length > 2000
@@ -893,15 +928,7 @@ async function refreshRosterInteraction(
                 'error'
             );
 
-            const components = [
-                rosterPaginationRow(
-                    prefix,
-                    filter,
-                    page.page,
-                    page.totalPages
-                ),
-                rosterFilterRow(prefix, filter)
-            ];
+            const components = buildRosterComponents(prefix, filter, page);
 
             await interaction.editReply({
                 content: content.length > 2000
@@ -1118,6 +1145,135 @@ async function handleLink(interaction) {
     });
 
     scheduleRelayPublish();
+}
+
+async function handleRosterLinkButton(interaction, targetId) {
+    const member = await interaction.guild.members.fetch(targetId).catch(() => null);
+
+    if (!member) {
+        await interaction.reply({
+            content: 'That user could not be found in the server.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    if (getLink(member.id)) {
+        await interaction.reply({
+            content: `${member} is already linked.`,
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    if (member.id !== interaction.user.id && !isPrivileged(interaction.member)) {
+        await interaction.reply({
+            content: 'Only the user themselves, an Administrator, or a Consigliere can link this user.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    const modal = new ModalBuilder()
+        .setCustomId(`rosterlinkmodal:${member.id}`)
+        .setTitle(`Link ${member.user.username}`.slice(0, 45));
+
+    const steamIdInput = new TextInputBuilder()
+        .setCustomId('steamid')
+        .setLabel('Steam ID')
+        .setPlaceholder('Enter your 17-digit Steam ID')
+        .setStyle(TextInputStyle.Short)
+        .setMinLength(17)
+        .setMaxLength(17)
+        .setRequired(true);
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(steamIdInput)
+    );
+
+    await interaction.showModal(modal);
+}
+
+async function handleRosterLinkModal(interaction, targetId) {
+    const steamId = interaction.fields.getTextInputValue('steamid').trim();
+
+    if (!isValidSteamId(steamId)) {
+        await interaction.reply({
+            content: 'Steam ID must be exactly 17 digits.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    const member = await interaction.guild.members.fetch(targetId).catch(() => null);
+
+    if (!member) {
+        await interaction.reply({
+            content: 'That user could not be found in the server.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    if (member.id !== interaction.user.id && !isPrivileged(interaction.member)) {
+        await interaction.reply({
+            content: 'Only the user themselves, an Administrator, or a Consigliere can link this user.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    if (getLink(member.id)) {
+        await interaction.reply({
+            content: `${member} is already linked. Use `/lookup` to see the existing link.`,
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    const existingSteamLink = getLinkBySteamId(steamId);
+
+    if (existingSteamLink) {
+        await interaction.reply({
+            content: `That Steam ID is already linked to <@${existingSteamLink.discord_id}>.`,
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    db.prepare(`
+        INSERT INTO steam_links (
+            discord_id,
+            steam_id,
+            discord_username,
+            linked_at
+        )
+        VALUES (?, ?, ?, ?)
+    `).run(
+        member.id,
+        steamId,
+        member.user.username,
+        Date.now()
+    );
+
+    addAudit({
+        action: 'LINK',
+        actorId: interaction.user.id,
+        targetId: member.id,
+        newSteamId: steamId
+    });
+
+    db.prepare(`
+        DELETE FROM nickname_cleanup
+        WHERE steam_id = ?
+    `).run(steamId);
+
+    scheduleRelayPublish();
+
+    await interaction.reply({
+        content: `Linked ${member} to Steam ID \`${steamId}\`.`,
+        flags: MessageFlags.Ephemeral
+    });
 }
 
 async function handleRemove(interaction) {
@@ -1483,6 +1639,16 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
             content: 'You need the Recruit, Gump, Administrator, or Consigliere role to use this command.',
             flags: MessageFlags.Ephemeral
         };
+
+        if (interaction.isModalSubmit()) {
+            const id = interaction.customId;
+
+            if (id.startsWith('rosterlinkmodal:')) {
+                const targetId = id.split(':')[1];
+                await handleRosterLinkModal(interaction, targetId);
+                return;
+            }
+        }
 
         if (interaction.isButton()) {
             await interaction.reply(response);
@@ -2075,6 +2241,12 @@ client.on('interactionCreate', async interaction => {
         if (interaction.isButton()) {
             const id = interaction.customId;
 
+            if (id.startsWith('rosterlink:')) {
+                const targetId = id.split(':')[1];
+                await handleRosterLinkButton(interaction, targetId);
+                return;
+            }
+
             // Confirmation buttons MUST be handled before generic
             // pagination/button handling.
             if (id.startsWith('confirmremove:')) {
@@ -2198,51 +2370,3 @@ client.on('guildMemberAdd', async member => {
 
     scheduleRelayPublish();
 });
-
-client.on('guildMemberRemove', async member => {
-    // Do NOT delete the database link here.
-    // Keeping it temporarily lets the nickname sync endpoint know
-    // that the user left and lets it set the Steam local nickname
-    // back to their Discord username.
-    scheduleRelayPublish();
-});
-
-// ============================================================
-// PROCESS SHUTDOWN
-// ============================================================
-
-function shutdown() {
-    console.log('Shutting down...');
-
-    try {
-        db.close();
-    } catch {
-        // Ignore.
-    }
-
-    try {
-        relayServer.close();
-    } catch {
-        // Ignore.
-    }
-
-    client.destroy();
-    process.exit(0);
-}
-
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
-
-process.on('unhandledRejection', error => {
-    console.error('Unhandled promise rejection:', error);
-});
-
-process.on('uncaughtException', error => {
-    console.error('Uncaught exception:', error);
-});
-
-// ============================================================
-// LOGIN
-// ============================================================
-
-client.login(process.env.DISCORD_TOKEN);

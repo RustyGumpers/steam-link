@@ -582,15 +582,23 @@ function bearerToken(req) {
 }
 
 function sendJson(res, status, data) {
-    const body = JSON.stringify(data);
-    res.writeHead(status, {
+    const headers = {
         'Content-Type': 'application/json; charset=utf-8',
         'Cache-Control': 'no-store',
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Allow-Methods': 'GET, OPTIONS'
-    });
-    res.end(body);
+    };
+
+    res.writeHead(status, headers);
+
+    // A 204 response must not contain a response body.
+    if (status === 204) {
+        res.end();
+        return;
+    }
+
+    res.end(JSON.stringify(data));
 }
 
 function requireClientToken(req, res) {
@@ -665,7 +673,7 @@ const relayServer = http.createServer((req, res) => {
     }
 });
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = positiveInteger(process.env.PORT, 3000, 65535);
 relayServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Railway HTTP relay listening on 0.0.0.0:${PORT}`);
 });
@@ -901,6 +909,10 @@ async function refreshRosterInteraction(
                 : content,
             components
         });
+
+        if (isCurrentRosterRefresh(messageKey, refreshVersion)) {
+            rosterRefreshVersions.delete(messageKey);
+        }
     } catch (error) {
         console.error(`Roster background refresh error (${roleName}):`, error);
 
@@ -1700,6 +1712,8 @@ async function handleExport(interaction) {
 
     const csv = [header, ...csvRows].join('\n');
 
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     const filePath = path.join(
         __dirname,
         `steam-export-${Date.now()}.csv`
@@ -1707,10 +1721,9 @@ async function handleExport(interaction) {
 
     fs.writeFileSync(filePath, csv, 'utf8');
 
-    await interaction.reply({
+    await interaction.editReply({
         content: `Export created with ${rows.length} link(s).`,
-        files: [filePath],
-        flags: MessageFlags.Ephemeral
+        files: [filePath]
     });
 
     setTimeout(() => {
@@ -1734,6 +1747,8 @@ async function handleBackup(interaction) {
 
     // Keep backups beside the persistent SQLite database so Railway volume
     // backups survive deployments/restarts.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     const backupDir = path.join(path.dirname(databasePath), 'backups');
 
     fs.mkdirSync(backupDir, { recursive: true });
@@ -1757,10 +1772,9 @@ async function handleBackup(interaction) {
         }
     }
 
-    await interaction.reply({
+    await interaction.editReply({
         content:
-            `Database backup created:\n\`${path.relative(path.dirname(databasePath), backupPath)}\``,
-        flags: MessageFlags.Ephemeral
+            `Database backup created:\n\`${path.relative(path.dirname(databasePath), backupPath)}\``
     });
 }
 
@@ -1983,17 +1997,19 @@ async function handleSelfLinkModal(interaction) {
     const steamId = interaction.fields.getTextInputValue('steamid').trim();
 
     if (!isValidSteamId(steamId)) {
-        await interaction.reply({
+        await interaction.editReply({
             content: 'Steam ID must be exactly 17 digits.',
             flags: MessageFlags.Ephemeral
         });
         return;
     }
 
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     const guild = client.guilds.cache.get(config.guildId);
 
     if (!guild) {
-        await interaction.reply({
+        await interaction.editReply({
             content: 'The Discord server could not be found. Please try again later.',
             flags: MessageFlags.Ephemeral
         });
@@ -2003,7 +2019,7 @@ async function handleSelfLinkModal(interaction) {
     const member = await guild.members.fetch(interaction.user.id).catch(() => null);
 
     if (!member) {
-        await interaction.reply({
+        await interaction.editReply({
             content: 'You could not be found in the Discord server.',
             flags: MessageFlags.Ephemeral
         });
@@ -2011,7 +2027,7 @@ async function handleSelfLinkModal(interaction) {
     }
 
     if (!canSelfLink(member)) {
-        await interaction.reply({
+        await interaction.editReply({
             content: 'You must have the Recruit or Gump role to link your Steam account.',
             flags: MessageFlags.Ephemeral
         });
@@ -2021,7 +2037,7 @@ async function handleSelfLinkModal(interaction) {
     const existingDiscordLink = getLink(member.id);
 
     if (existingDiscordLink) {
-        await interaction.reply({
+        await interaction.editReply({
             content: 'You are already linked to Steam ID `' + existingDiscordLink.steam_id + '`.',
             flags: MessageFlags.Ephemeral
         });
@@ -2031,7 +2047,7 @@ async function handleSelfLinkModal(interaction) {
     const existingSteamLink = getLinkBySteamId(steamId);
 
     if (existingSteamLink) {
-        await interaction.reply({
+        await interaction.editReply({
             content: 'That Steam ID is already linked to <@' + existingSteamLink.discord_id + '>.',
             flags: MessageFlags.Ephemeral
         });
@@ -2070,7 +2086,7 @@ async function handleSelfLinkModal(interaction) {
 
     saveSelfLink();
 
-    await interaction.reply({
+    await interaction.editReply({
         content: '✅ **Steam account linked successfully!**\n\nSteam ID: `' + steamId + '`',
         flags: MessageFlags.Ephemeral
     });
@@ -2416,6 +2432,13 @@ client.on('guildMemberAdd', async member => {
         );
     }
 
+    scheduleRelayPublish();
+});
+
+client.on('guildMemberRemove', member => {
+    // A member leaving the server should immediately trigger a relay refresh
+    // so their linked Steam nickname can be cleared without waiting for the
+    // 60-second periodic snapshot.
     scheduleRelayPublish();
 });
 

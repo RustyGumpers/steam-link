@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.1
+// @version      11
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/Discord-steam-link
 // @supportURL   https://github.com/RustyGumpers/Discord-steam-link/issues
@@ -565,7 +565,7 @@
             #discord-steam-sync-body{padding:12px}
             #discord-steam-sync-panel button:not(#discord-steam-sync-close){width:100%;margin:0 0 8px;padding:9px 10px;border:0;border-radius:3px;background:#66c0f4;color:#10212d;font-weight:700;cursor:pointer}
             #discord-steam-sync-panel button:not(#discord-steam-sync-close):hover{filter:brightness(1.08)}
-            #discord-steam-sync-setup{background:#8fdb9a!important;color:#16351d!important}\n            #discord-steam-sync-clear-friends{background:#d94141!important;color:#fff!important}
+            #discord-steam-sync-setup{background:#61B827!important;color:#ffffff!important}\n            #discord-steam-sync-clear-friends{background:#d94141!important;color:#fff!important}
             #discord-steam-sync-stop{background:#f2c94c!important;color:#1f1f1f!important}
             #discord-steam-sync-panel button:disabled{opacity:.5;cursor:not-allowed}
             #discord-steam-sync-status{margin-top:4px;line-height:1.35;min-height:38px;color:#d7d7d7}

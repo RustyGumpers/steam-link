@@ -398,7 +398,6 @@ async function fetchGuildMembers(options = {}) {
     // without repeatedly requesting the entire guild.
     if (
         cacheComplete &&
-        !options.bypassCooldown &&
         lastSuccessfulMemberFetch > 0 &&
         Date.now() - lastSuccessfulMemberFetch < MEMBER_FETCH_COOLDOWN_MS
     ) {
@@ -438,6 +437,17 @@ async function fetchGuildMembers(options = {}) {
                     fetched: true
                 };
             } catch (error) {
+                // An incomplete snapshot is a safety failure, not a reason to
+                // immediately issue another full opcode-8 request. Retrying
+                // that condition can collide with Discord's per-guild rate
+                // limit and still would not make /prune safe.
+                if (
+                    String(error?.message || '')
+                        .startsWith('Discord member snapshot incomplete')
+                ) {
+                    throw error;
+                }
+
                 const retryAfterMs = getGatewayRetryAfterMs(error);
 
                 if (attempt === 3) {

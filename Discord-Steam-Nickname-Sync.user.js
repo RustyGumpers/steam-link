@@ -785,7 +785,17 @@
             await sleep(2500);
             location.reload();
         } catch (error) {
-            setStatus(error.message || 'Could not remove friend nicknames.');
+            // If Remove All was stopped after some nicknames were already
+            // cleared, the old completed signature is no longer trustworthy.
+            // Clear it so the next normal sync cannot incorrectly report that
+            // the friends are already synchronized.
+            if (stopRequested) {
+                removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
+                removeStoredValue(RESYNC_AFTER_CLEAR_KEY);
+                setStatus('Nickname removal stopped.', 'The sync signature was cleared so the next sync will retry the required nicknames.');
+            } else {
+                setStatus(error.message || 'Could not remove friend nicknames.');
+            }
         } finally {
             syncRunning = false;
             setButtonDisabled(false);

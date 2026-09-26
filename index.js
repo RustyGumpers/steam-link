@@ -137,6 +137,7 @@ const PAGE_SIZE = positiveInteger(config.settings?.listPageSize, 10, 10);
 const MAX_AUDIT_ENTRIES = positiveInteger(config.settings?.maxAuditEntries, 250, 5000);
 const BACKUP_RETENTION = positiveInteger(config.settings?.backupRetention, 7, 100);
 const DISCORD_SAFE_CONTENT_LIMIT = 1900;
+const RELAY_MAX_AGE_MS = 5 * 60 * 1000;
 
 const requiredConfig = [
     ['DISCORD_GUILD_ID', config.guildId],
@@ -374,7 +375,9 @@ function getGatewayRetryAfterMs(error) {
 
 async function fetchGuildMembers(options = {}) {
     const guild = await getGuild();
-    const force = options.force !== false;
+    // Full member-list requests are expensive and rate limited by Discord.
+    // Default to cache-only unless a caller explicitly requests a refresh.
+    const force = options.force === true;
     // Treat only an exact cache/member-count match as complete. A cache that
     // is larger than the current guild count can contain stale entries and
     // must not be trusted for safety-sensitive operations such as /prune.
@@ -646,7 +649,9 @@ const relayServer = http.createServer((req, res) => {
                 discordReady: client.isReady(),
                 complete: relaySnapshot.complete,
                 states: relaySnapshot.states.length,
-                updatedAt: relaySnapshot.updatedAt
+                updatedAt: relaySnapshot.updatedAt,
+                stale: relaySnapshot.updatedAt > 0 &&
+                    Date.now() - relaySnapshot.updatedAt > RELAY_MAX_AGE_MS
             });
             return;
         }
@@ -660,6 +665,19 @@ const relayServer = http.createServer((req, res) => {
                     ok: false,
                     error: 'Sync data is not ready. Please try again shortly.',
                     complete: false
+                });
+                return;
+            }
+
+            if (
+                relaySnapshot.updatedAt <= 0 ||
+                Date.now() - relaySnapshot.updatedAt > RELAY_MAX_AGE_MS
+            ) {
+                sendJson(res, 503, {
+                    ok: false,
+                    error: 'Sync data is stale. Please try again shortly.',
+                    complete: false,
+                    stale: true
                 });
                 return;
             }
@@ -2062,14 +2080,16 @@ async function handleSelfLinkButton(interaction) {
 async function handleSelfLinkModal(interaction) {
     const steamId = interaction.fields.getTextInputValue('steamid').trim();
 
+    // A modal submission must be acknowledged before any editReply call.
+    // Deferring first also gives the slower Discord/database work more time.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     if (!isValidSteamId(steamId)) {
         await interaction.editReply({
             content: 'Steam ID must be exactly 17 digits.'
         });
         return;
     }
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const guild = client.guilds.cache.get(config.guildId);
 
@@ -2466,37 +2486,45 @@ client.on('presenceUpdate', async (oldPresence, newPresence) => {
 });
 
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
-    const link = getLink(newMember.id);
+    try {
+        const link = getLink(newMember.id);
 
-    if (link) {
-        db.prepare(`
-            UPDATE steam_links
-            SET discord_username = ?
-            WHERE discord_id = ?
-        `).run(
-            newMember.user.username,
-            newMember.id
-        );
+        if (link) {
+            db.prepare(`
+                UPDATE steam_links
+                SET discord_username = ?
+                WHERE discord_id = ?
+            `).run(
+                newMember.user.username,
+                newMember.id
+            );
+        }
+
+        scheduleRelayPublish();
+    } catch (error) {
+        console.error('Guild member update handling failed:', error);
     }
-
-    scheduleRelayPublish();
 });
 
 client.on('guildMemberAdd', async member => {
-    const link = getLink(member.id);
+    try {
+        const link = getLink(member.id);
 
-    if (link) {
-        db.prepare(`
-            UPDATE steam_links
-            SET discord_username = ?
-            WHERE discord_id = ?
-        `).run(
-            member.user.username,
-            member.id
-        );
+        if (link) {
+            db.prepare(`
+                UPDATE steam_links
+                SET discord_username = ?
+                WHERE discord_id = ?
+            `).run(
+                member.user.username,
+                member.id
+            );
+        }
+
+        scheduleRelayPublish();
+    } catch (error) {
+        console.error('Guild member add handling failed:', error);
     }
-
-    scheduleRelayPublish();
 });
 
 client.on('guildMemberRemove', member => {

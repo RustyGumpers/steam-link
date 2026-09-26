@@ -126,9 +126,15 @@ const ROLE_RECRUIT = config.roles.recruit;
 const ROLE_GUMP = config.roles.gump;
 const ROLE_CONSIGLIERE = config.roles.consigliere;
 
-const PAGE_SIZE = Number(config.settings?.listPageSize || 10);
-const AUDIT_PAGE_SIZE = Number(config.settings?.auditPageSize || 10);
-const MAX_AUDIT_ENTRIES = Number(config.settings?.maxAuditEntries || 250);
+function positiveInteger(value, fallback, max = Number.MAX_SAFE_INTEGER) {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 1) return fallback;
+    return Math.min(number, max);
+}
+
+const PAGE_SIZE = positiveInteger(config.settings?.listPageSize, 10, 10);
+const AUDIT_PAGE_SIZE = positiveInteger(config.settings?.auditPageSize, 10, 50);
+const MAX_AUDIT_ENTRIES = positiveInteger(config.settings?.maxAuditEntries, 250, 5000);
 
 const requiredConfig = [
     ['DISCORD_GUILD_ID', config.guildId],
@@ -713,12 +719,11 @@ function getRosterMembersFromCache(roleId) {
 }
 
 async function getFreshRosterMembers(roleId) {
-    // Roster commands explicitly request a live member snapshot. The relay
-    // publisher keeps its 60-second cooldown, but a roster refresh must not
-    // silently reuse that snapshot or the message can remain marked cached.
+    // Use the shared member-fetch cooldown. Normal Discord member events keep
+    // the cache current between full snapshots, avoiding repeated Gateway
+    // opcode-8 requests.
     const snapshot = await fetchGuildMembers({
-        force: true,
-        bypassCooldown: true
+        force: true
     });
 
     if (!snapshot.complete) {
@@ -810,6 +815,14 @@ function formatRosterLines(members, offset = 0) {
         const steamUrl = `https://steamcommunity.com/profiles/${link.steam_id}`;
         return `${offset + index + 1}. ${member}\n   Steam: [${link.steam_id}](<${steamUrl}>)`;
     }).join('\n\n');
+}
+
+function buildRosterComponents(prefix, filter, page) {
+    const components = [];
+    const pagination = rosterPaginationRow(prefix, filter, page.page, page.totalPages);
+    if (pagination) components.push(pagination);
+    components.push(rosterFilterRow(prefix, filter));
+    return components;
 }
 
 function buildRosterContent(roleName, members, filteredMembers, page, status = 'cached') {
@@ -1100,6 +1113,12 @@ async function handleLink(interaction) {
         Date.now()
     );
 
+    db.prepare(`
+        UPDATE sync_tokens
+        SET steam_id = ?
+        WHERE discord_id = ?
+    `).run(steamId, member.id);
+
     addAudit({
         action: 'LINK',
         actorId: interaction.user.id,
@@ -1113,6 +1132,11 @@ async function handleLink(interaction) {
         DELETE FROM nickname_cleanup
         WHERE steam_id = ?
     `).run(steamId);
+
+    db.prepare(`
+        DELETE FROM link_prompt_notifications
+        WHERE discord_id = ?
+    `).run(member.id);
 
     await interaction.reply({
         content:
@@ -1142,6 +1166,12 @@ async function handleUnlink(interaction) {
 
     db.prepare(`
         DELETE FROM steam_links
+        WHERE discord_id = ?
+    `).run(interaction.user.id);
+
+    db.prepare(`
+        UPDATE sync_tokens
+        SET steam_id = ''
         WHERE discord_id = ?
     `).run(interaction.user.id);
 
@@ -1547,15 +1577,7 @@ async function handleRoleList(interaction, roleName, roleId, prefix, filter = 'a
         'cached'
     );
 
-    const components = [];
-    const pagination = rosterPaginationRow(
-        prefix,
-        filter,
-        page.page,
-        page.totalPages
-    );
-    if (pagination) components.push(pagination);
-    components.push(rosterFilterRow(prefix, filter));
+    const components = buildRosterComponents(prefix, filter, page);
 
     const payload = {
         content: content.length > 2000
@@ -1621,15 +1643,6 @@ async function handleStats(interaction) {
     const linked = db.prepare(`
         SELECT COUNT(*) AS count
         FROM steam_links
-    `).get().count;
-
-    const gumpLinked = db.prepare(`
-        SELECT COUNT(*) AS count
-        FROM steam_links
-        WHERE discord_id IN (
-            SELECT discord_id
-            FROM steam_links
-        )
     `).get().count;
 
     let gumpTotal = 0;
@@ -1812,7 +1825,9 @@ async function handleBackup(interaction) {
         return;
     }
 
-    const backupDir = path.join(__dirname, 'backups');
+    // Keep backups beside the persistent SQLite database so Railway volume
+    // backups survive deployments/restarts.
+    const backupDir = path.join(path.dirname(databasePath), 'backups');
 
     fs.mkdirSync(backupDir, { recursive: true });
 
@@ -1825,7 +1840,7 @@ async function handleBackup(interaction) {
 
     await interaction.reply({
         content:
-            `Database backup created:\n\`${path.relative(__dirname, backupPath)}\``,
+            `Database backup created:\n\`${path.relative(path.dirname(databasePath), backupPath)}\``,
         flags: MessageFlags.Ephemeral
     });
 }
@@ -1944,16 +1959,30 @@ async function handlePrune(interaction) {
 }
 
 
+const linkPromptInFlight = new Set();
+
+function getPromptDay() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function wasPromptedToday(discordId) {
+    const record = db.prepare(
+        'SELECT notified_at FROM link_prompt_notifications WHERE discord_id = ?'
+    ).get(discordId);
+
+    if (!record) return false;
+
+    return new Date(record.notified_at).toISOString().slice(0, 10) === getPromptDay();
+}
+
 async function sendSteamLinkPrompt(member) {
     if (!member || member.user?.bot) return false;
     if (!hasRosterRole(member)) return false;
     if (getLink(member.id)) return false;
+    if (wasPromptedToday(member.id)) return false;
+    if (linkPromptInFlight.has(member.id)) return false;
 
-    const alreadyNotified = db.prepare(
-        'SELECT discord_id FROM link_prompt_notifications WHERE discord_id = ?'
-    ).get(member.id);
-
-    if (alreadyNotified) return false;
+    linkPromptInFlight.add(member.id);
 
     const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -1972,17 +2001,22 @@ async function sendSteamLinkPrompt(member) {
             components: [row]
         });
 
-        db.prepare(
-            'INSERT OR IGNORE INTO link_prompt_notifications (discord_id, notified_at) VALUES (?, ?)'
-        ).run(member.id, Date.now());
+        db.prepare(`
+            INSERT INTO link_prompt_notifications (discord_id, notified_at)
+            VALUES (?, ?)
+            ON CONFLICT(discord_id)
+            DO UPDATE SET notified_at = excluded.notified_at
+        `).run(member.id, Date.now());
 
-        console.log('Sent Steam link prompt to ' + member.user.username + ' (' + member.id + ').');
+        console.log('Sent daily Steam link prompt to ' + member.user.username + ' (' + member.id + ').');
         return true;
     } catch (error) {
         console.warn(
             'Could not DM Steam link prompt to ' + member.user.username + ' (' + member.id + '): ' + (error.message || error)
         );
         return false;
+    } finally {
+        linkPromptInFlight.delete(member.id);
     }
 }
 
@@ -2086,6 +2120,14 @@ async function handleSelfLinkModal(interaction) {
         'DELETE FROM nickname_cleanup WHERE steam_id = ?'
     ).run(steamId);
 
+    db.prepare(
+        'DELETE FROM link_prompt_notifications WHERE discord_id = ?'
+    ).run(member.id);
+
+    db.prepare(
+        'UPDATE sync_tokens SET steam_id = ? WHERE discord_id = ?'
+    ).run(steamId, member.id);
+
     await interaction.reply({
         content: '✅ **Steam account linked successfully!**\n\nSteam ID: `' + steamId + '`',
         flags: MessageFlags.Ephemeral
@@ -2166,6 +2208,33 @@ async function handleAuditPage(interaction, pageNumber) {
 // DISCORD EVENTS
 // ============================================================
 
+async function scanOnlineMembersForLinkPrompts() {
+    try {
+        const snapshot = await fetchGuildMembers({ force: true });
+        if (!snapshot.complete) {
+            console.warn('Skipping online Steam link prompt scan because the member snapshot is incomplete.');
+            return;
+        }
+
+        let checked = 0;
+        let prompted = 0;
+
+        for (const member of snapshot.members.values()) {
+            if (member.user?.bot) continue;
+            if (!hasRosterRole(member)) continue;
+            const status = member.presence?.status || 'offline';
+            if (status === 'offline') continue;
+
+            checked++;
+            if (await sendSteamLinkPrompt(member)) prompted++;
+        }
+
+        console.log(`Daily Steam link prompt scan complete: checked ${checked} online roster member(s), sent ${prompted} prompt(s).`);
+    } catch (error) {
+        console.error('Online Steam link prompt scan failed:', error);
+    }
+}
+
 client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
 
@@ -2181,6 +2250,7 @@ client.once('clientReady', async () => {
     }
 
     await publishRelaySnapshot();
+    await scanOnlineMembersForLinkPrompts();
     setInterval(() => publishRelaySnapshot().catch(console.error), 60_000);
 });
 

@@ -2,13 +2,13 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.8
+// @version      10.1.9
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
 // @updateURL    https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
-// @match        https://steamcommunity.com/*
+// @match        https://steamcommunity.com/my/friends*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
@@ -39,6 +39,7 @@
     let stopRequested = false;
     let syncRunning = false;
     let pollTimer = null;
+    const activeRequestAborts = new Set();
 
     function readStoredValue(key, fallback = '') {
         try {
@@ -160,17 +161,23 @@
 
         return new Promise((resolve, reject) => {
             let settled = false;
+            let request = null;
+
+            const cleanup = () => {
+                if (request) activeRequestAborts.delete(request);
+            };
+
             const finish = (fn, value) => {
                 if (settled) return;
                 settled = true;
+                cleanup();
                 fn(value);
             };
 
-            const timer = setTimeout(() => finish(reject, new Error('Request timed out.')), REQUEST_TIMEOUT_MS);
-
-            GM_xmlhttpRequest({
+            request = GM_xmlhttpRequest({
                 method,
                 url,
+                timeout: REQUEST_TIMEOUT_MS,
                 headers: {
                     Accept: 'application/json',
                     Authorization: `Bearer ${token}`,
@@ -178,7 +185,6 @@
                 },
                 data: body ? JSON.stringify(body) : undefined,
                 onload: response => {
-                    clearTimeout(timer);
                     let data = {};
                     try { data = JSON.parse(response.responseText || '{}'); }
                     catch { finish(reject, new Error('Server returned invalid JSON.')); return; }
@@ -192,15 +198,14 @@
                     }
                     finish(resolve, data);
                 },
-                onerror: () => {
-                    clearTimeout(timer);
-                    finish(reject, new Error('Network request failed.'));
-                },
-                ontimeout: () => {
-                    clearTimeout(timer);
-                    finish(reject, new Error('Request timed out.'));
-                }
+                onerror: () => finish(reject, new Error('Network request failed.')),
+                onabort: () => finish(reject, new Error('Request aborted.')),
+                ontimeout: () => finish(reject, new Error('Request timed out.'))
             });
+
+            if (!settled && request?.abort) {
+                activeRequestAborts.add(request);
+            }
         });
     }
 
@@ -238,6 +243,24 @@
     function getSteamDisplayName(friendBlock) {
         if (!friendBlock) return '';
 
+        // Steam's friend blocks expose the persona name in data-search.
+        // Prefer the dedicated persona/name element before using text-line
+        // fallbacks so unrelated status text cannot become the nickname.
+        const persona = friendBlock.querySelector(
+            '.friend_block_content a.friend_block_content_link, ' +
+            '.friend_block_content .friend_block_persona, ' +
+            '.friend_block_content a'
+        );
+        if (persona) {
+            const name = trimNickname(
+                persona.getAttribute('data-search') ||
+                persona.getAttribute('title') ||
+                persona.textContent ||
+                ''
+            );
+            if (name) return name;
+        }
+
         const dataSearch = String(friendBlock.getAttribute('data-search') || '').trim();
         if (dataSearch) {
             const first = dataSearch.split(/\s*;\s*/)[0];
@@ -251,13 +274,7 @@
                 .split(/\r?\n/)[0]
                 .replace(/^\*+/, '');
             const name = trimNickname(firstLine);
-            if (name) return name;
-        }
-
-        const persona = friendBlock.querySelector('.friend_block_content a, .friend_block_content .friend_block_persona');
-        if (persona) {
-            const name = trimNickname(persona.textContent || persona.getAttribute('title') || '');
-            if (name) return name;
+            if (firstLine && name) return name;
         }
 
         return '';
@@ -289,11 +306,33 @@
         return trimNickname(state?.nickname || '');
     }
 
+    function isSteamFriendListRendered() {
+        if (document.querySelector(
+            '#friends_list, .friends_list, .friend_list, ' +
+            '.friend_list_container, .friends_list_container'
+        )) {
+            return true;
+        }
+
+        const text = String(document.body?.innerText || '').toLowerCase();
+        return (
+            text.includes('you have no friends') ||
+            text.includes('no friends to display') ||
+            text.includes('your friends list is empty')
+        );
+    }
+
     async function scanFriends() {
         for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
             if (stopRequested) throw new Error('Sync stopped.');
             const friends = getFriendBlocks();
             if (friends.size > 0) return friends;
+
+            // An empty Steam friends list is a valid state. Do not make users
+            // wait through all retry attempts when Steam has rendered the
+            // friends-list container/empty state.
+            if (isSteamFriendListRendered()) return friends;
+
             setStatus('Waiting for Steam friends to finish loading…', `Scan ${attempt}/${AUTO_SCAN_RETRIES}`);
             await sleep(AUTO_SCAN_RETRY_DELAY_MS);
         }
@@ -323,9 +362,21 @@
         if (Date.now() - last < FRIEND_REQUEST_COOLDOWN_MS) return 'throttled';
 
         return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
+            let request = null;
+
+            const cleanup = () => {
+                if (request) activeRequestAborts.delete(request);
+            };
+
+            const finish = (fn, value) => {
+                cleanup();
+                fn(value);
+            };
+
+            request = GM_xmlhttpRequest({
                 method: 'POST',
                 url: 'https://steamcommunity.com/actions/AddFriendAjax',
+                timeout: REQUEST_TIMEOUT_MS,
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
                 data: `sessionID=${encodeURIComponent(sessionID)}&steamid=${encodeURIComponent(steamId)}&accept_invite=0`,
                 onload: response => {
@@ -339,10 +390,10 @@
                         if (/already|pending|request/.test(text)) {
                             state[steamId] = Date.now();
                             writeFriendRequestState(state);
-                            resolve('pending');
+                            finish(resolve, 'pending');
                             return;
                         }
-                        reject(new Error(`Steam friend request failed for ${steamId}.`));
+                        finish(reject, new Error(`Steam friend request failed for ${steamId}.`));
                         return;
                     }
 
@@ -359,22 +410,25 @@
                     if (sentSuccessfully) {
                         state[steamId] = Date.now();
                         writeFriendRequestState(state);
-                        resolve('sent');
+                        finish(resolve, 'sent');
                         return;
                     }
 
                     if (explicitlyPending) {
                         state[steamId] = Date.now();
                         writeFriendRequestState(state);
-                        resolve('pending');
+                        finish(resolve, 'pending');
                         return;
                     }
 
-                    reject(new Error(`Steam did not confirm the friend request for ${steamId}.`));
+                    finish(reject, new Error(`Steam did not confirm the friend request for ${steamId}.`));
                 },
-                onerror: () => reject(new Error(`Steam friend request failed for ${steamId}.`)),
-                ontimeout: () => reject(new Error(`Steam friend request timed out for ${steamId}.`))
+                onerror: () => finish(reject, new Error(`Steam friend request failed for ${steamId}.`)),
+                onabort: () => finish(reject, new Error('Friend request aborted.')),
+                ontimeout: () => finish(reject, new Error(`Steam friend request timed out for ${steamId}.`))
             });
+
+            if (request?.abort) activeRequestAborts.add(request);
         });
     }
 
@@ -383,9 +437,21 @@
         if (!sessionID) throw new Error('Steam session ID was not found.');
 
         return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
+            let request = null;
+
+            const cleanup = () => {
+                if (request) activeRequestAborts.delete(request);
+            };
+
+            const finish = (fn, value) => {
+                cleanup();
+                fn(value);
+            };
+
+            request = GM_xmlhttpRequest({
                 method: 'POST',
                 url: `https://steamcommunity.com/profiles/${steamId}/ajaxsetnickname/`,
+                timeout: REQUEST_TIMEOUT_MS,
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
                 data: `nickname=${encodeURIComponent(trimNickname(nickname))}&sessionid=${encodeURIComponent(sessionID)}`,
                 onload: response => {
@@ -403,10 +469,14 @@
                         reject(new Error(`Steam nickname update returned invalid data for ${steamId}.`));
                         return;
                     }
-                    resolve();
+                    finish(resolve);
                 },
-                onerror: () => reject(new Error(`Steam nickname update failed for ${steamId}.`))
+                onerror: () => finish(reject, new Error(`Steam nickname update failed for ${steamId}.`)),
+                onabort: () => finish(reject, new Error('Nickname update aborted.')),
+                ontimeout: () => finish(reject, new Error(`Steam nickname update timed out for ${steamId}.`))
             });
+
+            if (request?.abort) activeRequestAborts.add(request);
         });
     }
 
@@ -507,7 +577,11 @@
                         requestFailures++;
                     }
 
-                    await sleep(FRIEND_REQUEST_MIN_INTERVAL_MS);
+                    // Do not add the delay when this account is already in the
+                    // 24-hour cooldown; only actual Steam requests need spacing.
+                    if (Number(readFriendRequestState()[steamId] || 0) === 0) {
+                        await sleep(FRIEND_REQUEST_MIN_INTERVAL_MS);
+                    }
                 }
 
                 if (requestFailures) {
@@ -747,7 +821,12 @@
         panel.querySelector('#discord-steam-sync-clear-friends').addEventListener('click', clearAllFriendNicknames);
         panel.querySelector('#discord-steam-sync-stop').addEventListener('click', () => {
             stopRequested = true;
-            setStatus('Stopping after the current request…');
+
+            for (const abort of [...activeRequestAborts]) {
+                try { abort(); } catch {}
+            }
+
+            setStatus('Stopping current sync…');
         });
 
         setStatus(getToken() ? (isFriendsPage() ? 'Ready.' : 'Open Steam → Friends to sync.') : 'Set your personal sync token first.');

@@ -1108,46 +1108,28 @@ async function handleLink(interaction) {
         return;
     }
 
-    db.prepare(`
-        INSERT INTO steam_links (
-            discord_id,
-            steam_id,
-            discord_username,
-            linked_at
-        )
-        VALUES (?, ?, ?, ?)
-    `).run(
-        member.id,
-        steamId,
-        member.user.username,
-        Date.now()
-    );
+    const saveLink = db.transaction(() => {
+        db.prepare(`
+            INSERT INTO steam_links (
+                discord_id, steam_id, discord_username, linked_at
+            )
+            VALUES (?, ?, ?, ?)
+        `).run(member.id, steamId, member.user.username, Date.now());
 
-    db.prepare(`
-        UPDATE sync_tokens
-        SET steam_id = ?
-        WHERE discord_id = ?
-    `).run(steamId, member.id);
+        db.prepare(`UPDATE sync_tokens SET steam_id = ? WHERE discord_id = ?`).run(steamId, member.id);
 
-    addAudit({
-        action: 'LINK',
-        actorId: interaction.user.id,
-        targetId: member.id,
-        newSteamId: steamId
+        addAudit({
+            action: 'LINK',
+            actorId: interaction.user.id,
+            targetId: member.id,
+            newSteamId: steamId
+        });
+
+        db.prepare(`DELETE FROM nickname_cleanup WHERE steam_id = ?`).run(steamId);
+        db.prepare(`DELETE FROM link_prompt_notifications WHERE discord_id = ?`).run(member.id);
     });
 
-    // If this Steam ID was previously queued for cleanup,
-    // it is now actively linked again.
-    db.prepare(`
-        DELETE FROM nickname_cleanup
-        WHERE steam_id = ?
-    `).run(steamId);
-
-    db.prepare(`
-        DELETE FROM link_prompt_notifications
-        WHERE discord_id = ?
-    `).run(member.id);
-
+    saveLink();
     await interaction.reply({
         content:
             `Linked ${member} to Steam ID \`${steamId}\`.`,
@@ -1168,31 +1150,20 @@ async function handleUnlink(interaction) {
         return;
     }
 
-    queueNicknameCleanup(
-        link.steam_id,
-        interaction.user.username,
-        'User unlinked their own Steam link'
-    );
-
-    db.prepare(`
-        DELETE FROM steam_links
-        WHERE discord_id = ?
-    `).run(interaction.user.id);
-
-    db.prepare(`
-        UPDATE sync_tokens
-        SET steam_id = ''
-        WHERE discord_id = ?
-    `).run(interaction.user.id);
-
-    addAudit({
-        action: 'UNLINK',
-        actorId: interaction.user.id,
-        targetId: interaction.user.id,
-        oldSteamId: link.steam_id,
-        details: 'User unlinked their own Steam link'
+    const unlink = db.transaction(() => {
+        queueNicknameCleanup(link.steam_id, interaction.user.username, 'User unlinked their own Steam link');
+        db.prepare(`DELETE FROM steam_links WHERE discord_id = ?`).run(interaction.user.id);
+        db.prepare(`UPDATE sync_tokens SET steam_id = '' WHERE discord_id = ?`).run(interaction.user.id);
+        addAudit({
+            action: 'UNLINK',
+            actorId: interaction.user.id,
+            targetId: interaction.user.id,
+            oldSteamId: link.steam_id,
+            details: 'User unlinked their own Steam link'
+        });
     });
 
+    unlink();
     await interaction.reply({
         content: `Unlinked your Steam ID \`${link.steam_id}\`. Your Recruit/Gump role was left unchanged.`,
         flags: MessageFlags.Ephemeral
@@ -1264,29 +1235,14 @@ async function performRemove(interaction, targetId) {
         return;
     }
 
-    queueNicknameCleanup(
-        link.steam_id,
-        member.user.username,
-        'Steam link removed'
-    );
-
-    db.prepare(`
-        DELETE FROM steam_links
-        WHERE discord_id = ?
-    `).run(targetId);
-
-    db.prepare(`
-        DELETE FROM sync_tokens
-        WHERE discord_id = ?
-    `).run(targetId);
-
-    addAudit({
-        action: 'REMOVE',
-        actorId: interaction.user.id,
-        targetId,
-        oldSteamId: link.steam_id
+    const removeLink = db.transaction(() => {
+        queueNicknameCleanup(link.steam_id, member.user.username, 'Steam link removed');
+        db.prepare(`DELETE FROM steam_links WHERE discord_id = ?`).run(targetId);
+        db.prepare(`DELETE FROM sync_tokens WHERE discord_id = ?`).run(targetId);
+        addAudit({ action: 'REMOVE', actorId: interaction.user.id, targetId, oldSteamId: link.steam_id });
     });
 
+    removeLink();
     const rolesToRemove = [];
 
     if (member.roles.cache.has(ROLE_RECRUIT)) {
@@ -1425,43 +1381,15 @@ async function handleEdit(interaction) {
         return;
     }
 
-    queueNicknameCleanup(
-        link.steam_id,
-        member.user.username,
-        'Steam ID changed'
-    );
-
-    db.prepare(`
-        UPDATE steam_links
-        SET
-            steam_id = ?,
-            discord_username = ?
-        WHERE discord_id = ?
-    `).run(
-        newSteamId,
-        member.user.username,
-        member.id
-    );
-
-    db.prepare(`
-        UPDATE sync_tokens
-        SET steam_id = ?
-        WHERE discord_id = ?
-    `).run(newSteamId, member.id);
-
-    addAudit({
-        action: 'EDIT',
-        actorId: interaction.user.id,
-        targetId: member.id,
-        oldSteamId: link.steam_id,
-        newSteamId
+    const editLink = db.transaction(() => {
+        queueNicknameCleanup(link.steam_id, member.user.username, 'Steam ID changed');
+        db.prepare(`UPDATE steam_links SET steam_id = ?, discord_username = ? WHERE discord_id = ?`).run(newSteamId, member.user.username, member.id);
+        db.prepare(`UPDATE sync_tokens SET steam_id = ? WHERE discord_id = ?`).run(newSteamId, member.id);
+        addAudit({ action: 'EDIT', actorId: interaction.user.id, targetId: member.id, oldSteamId: link.steam_id, newSteamId });
+        db.prepare(`DELETE FROM nickname_cleanup WHERE steam_id = ?`).run(newSteamId);
     });
 
-    db.prepare(`
-        DELETE FROM nickname_cleanup
-        WHERE steam_id = ?
-    `).run(newSteamId);
-
+    editLink();
     await interaction.reply({
         content:
             `Changed ${member}'s Steam ID from \`${link.steam_id}\` to \`${newSteamId}\`.`,

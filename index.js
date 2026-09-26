@@ -1626,8 +1626,7 @@ async function handleStats(interaction) {
             `Recruit linked: **${recruitLinkedCount}**\n\n` +
             `Linked but unassigned/absent: **${unassignedLinked}**\n` +
             `Total Steam links: **${linked}**\n` +
-            `Nickname cleanup queue: **${cleanupCount}**`,
-        flags: MessageFlags.Ephemeral
+            `Nickname cleanup queue: **${cleanupCount}**`
     });
 }
 
@@ -1998,8 +1997,7 @@ async function handleSelfLinkModal(interaction) {
 
     if (!isValidSteamId(steamId)) {
         await interaction.editReply({
-            content: 'Steam ID must be exactly 17 digits.',
-            flags: MessageFlags.Ephemeral
+            content: 'Steam ID must be exactly 17 digits.'
         });
         return;
     }
@@ -2010,8 +2008,7 @@ async function handleSelfLinkModal(interaction) {
 
     if (!guild) {
         await interaction.editReply({
-            content: 'The Discord server could not be found. Please try again later.',
-            flags: MessageFlags.Ephemeral
+            content: 'The Discord server could not be found. Please try again later.'
         });
         return;
     }
@@ -2020,16 +2017,14 @@ async function handleSelfLinkModal(interaction) {
 
     if (!member) {
         await interaction.editReply({
-            content: 'You could not be found in the Discord server.',
-            flags: MessageFlags.Ephemeral
+            content: 'You could not be found in the Discord server.'
         });
         return;
     }
 
     if (!canSelfLink(member)) {
         await interaction.editReply({
-            content: 'You must have the Recruit or Gump role to link your Steam account.',
-            flags: MessageFlags.Ephemeral
+            content: 'You must have the Recruit or Gump role to link your Steam account.'
         });
         return;
     }
@@ -2038,8 +2033,7 @@ async function handleSelfLinkModal(interaction) {
 
     if (existingDiscordLink) {
         await interaction.editReply({
-            content: 'You are already linked to Steam ID `' + existingDiscordLink.steam_id + '`.',
-            flags: MessageFlags.Ephemeral
+            content: 'You are already linked to Steam ID `' + existingDiscordLink.steam_id + '`.'
         });
         return;
     }
@@ -2048,8 +2042,7 @@ async function handleSelfLinkModal(interaction) {
 
     if (existingSteamLink) {
         await interaction.editReply({
-            content: 'That Steam ID is already linked to <@' + existingSteamLink.discord_id + '>.',
-            flags: MessageFlags.Ephemeral
+            content: 'That Steam ID is already linked to <@' + existingSteamLink.discord_id + '>.'
         });
         return;
     }
@@ -2087,8 +2080,7 @@ async function handleSelfLinkModal(interaction) {
     saveSelfLink();
 
     await interaction.editReply({
-        content: '✅ **Steam account linked successfully!**\n\nSteam ID: `' + steamId + '`',
-        flags: MessageFlags.Ephemeral
+        content: '✅ **Steam account linked successfully!**\n\nSteam ID: `' + steamId + '`'
     });
 
     scheduleRelayPublish();

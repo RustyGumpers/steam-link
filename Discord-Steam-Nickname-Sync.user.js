@@ -2,10 +2,10 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.1
+// @version      10.1.2
 // @description  Sync Steam friend local nicknames from Discord roles.
-// @homepageURL  https://github.com/RustyGumpers/Discord-steam-link
-// @supportURL   https://github.com/RustyGumpers/Discord-steam-link/issues
+// @homepageURL  https://github.com/RustyGumpers/steam-link
+// @supportURL   https://github.com/RustyGumpers/steam-link/issues
 // @updateURL    https://raw.githubusercontent.com/RustyGumpers/Discord-steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/RustyGumpers/Discord-steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @match        https://steamcommunity.com/*
@@ -412,7 +412,10 @@
 
                 const friendBlock = friends.get(steamId);
                 if (!friendBlock) {
-                    if (state?.role) desired.set(steamId, null);
+                    // Keep every Discord-linked Steam ID in the missing set.
+                    // A friend request is sent below for linked users who are
+                    // not currently on the Steam Friends page.
+                    desired.set(steamId, null);
                     continue;
                 }
 
@@ -476,9 +479,15 @@
             let completed = 0;
 
             if (entries.length === 0) {
-                throw new Error(
-                    `No matching Steam friends to update. Steam found ${friends.size} friend(s), but none of the ${desired.size} Discord-linked Steam IDs could be resolved.`
+                const requestedText = missing.length
+                    ? ` Friend requests were sent/are pending for ${missing.length} linked account(s) that were not on your current Steam Friends list.`
+                    : '';
+                setStatus(
+                    'No Discord-linked Steam accounts are currently on your Steam Friends list.',
+                    `Steam found ${friends.size} friend(s), but none of the ${desired.size} linked Steam IDs matched.${requestedText}`
                 );
+                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature);
+                return;
             }
 
             for (const [steamId, nickname] of entries) {

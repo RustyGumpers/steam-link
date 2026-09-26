@@ -397,14 +397,13 @@ async function fetchGuildMembers(options = {}) {
     // updated by normal member events, so callers still see current data
     // without repeatedly requesting the entire guild.
     if (
-        cacheComplete &&
         lastSuccessfulMemberFetch > 0 &&
         Date.now() - lastSuccessfulMemberFetch < MEMBER_FETCH_COOLDOWN_MS
     ) {
         return {
             guild,
             members: guild.members.cache,
-            complete: true,
+            complete: cacheComplete,
             fetched: false
         };
     }
@@ -1646,6 +1645,15 @@ async function handleStats(interaction) {
 
     let snapshot = await fetchGuildMembers({ force: false });
     if (!snapshot.complete) snapshot = await fetchGuildMembers({ force: true });
+
+    if (!snapshot.complete) {
+        await interaction.editReply({
+            content:
+                'Discord member data could not be refreshed safely, so the statistics were not generated. Please try again shortly.'
+        });
+        return;
+    }
+
     const guild = snapshot.guild;
     const members = snapshot.members;
 

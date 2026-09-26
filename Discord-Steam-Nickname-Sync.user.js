@@ -549,9 +549,9 @@
 
     function sanitizeNicknameResponseText(value) {
         return String(value || '')
-            .replace(/Bearer\\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
-            .replace(/sessionid=[^&\\s"'<>]*/gi, 'sessionid=[redacted]')
-            .replace(/token[=:][^\\s&,;"'<>]+/gi, 'token=[redacted]')
+            .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
+            .replace(/sessionid=[^&\s"'<>]*/gi, 'sessionid=[redacted]')
+            .replace(/token[=:][^\s&,;"'<>]+/gi, 'token=[redacted]')
             .slice(0, 600);
     }
 

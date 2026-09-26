@@ -2282,6 +2282,16 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
+        if (interaction.isModalSubmit()) {
+            const id = interaction.customId;
+
+            if (id.startsWith('rosterlinkmodal:')) {
+                const targetId = id.split(':')[1];
+                await handleRosterLinkModal(interaction, targetId);
+                return;
+            }
+        }
+
         if (interaction.isButton()) {
             const id = interaction.customId;
 

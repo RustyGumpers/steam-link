@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.6
+// @version      10.1.7
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -35,7 +35,6 @@
     const REQUEST_TIMEOUT_MS = 15000;
     const MAX_NICKNAME_LENGTH = 32;
     const FRIEND_REQUEST_MIN_INTERVAL_MS = 1500;
-    const LAST_MISSING_SIGNATURE_KEY = 'discordSteamSyncLastMissingSignatureV1';
 
     let stopRequested = false;
     let syncRunning = false;
@@ -75,16 +74,6 @@
 
     function getCustomPrefix() {
         return trimNickname(readStoredValue(CUSTOM_PREFIX_KEY, '') || '');
-    }
-
-    function applyCustomPrefix(nickname) {
-        const base = trimNickname(nickname);
-        const prefix = getCustomPrefix();
-        if (!prefix) return base;
-
-        // Replace the built-in role prefix when one is present.
-        const withoutBuiltInPrefix = base.replace(/^(?:Gump|Recruit)\s+/i, '');
-        return trimNickname(`${prefix} ${withoutBuiltInPrefix}`);
     }
 
     function trimNickname(value) {
@@ -274,28 +263,18 @@
         return '';
     }
 
-    function getRolePrefix(state, serverNickname = '') {
+    function getRolePrefix(state) {
         const role = String(state?.role || '').trim().toLowerCase();
         if (role === 'gump') return 'Gump';
         if (role === 'recruit') return 'Recruit';
-
-        const parsed = String(serverNickname || '').trim().match(/^(Gump|Recruit)\s+/i);
-        return parsed ? parsed[1] : '';
+        return '';
     }
 
     function buildFinalNickname(state, friendBlock) {
         const steamName = getSteamDisplayName(friendBlock);
         if (!steamName) return '';
 
-        const serverNickname = trimNickname(
-            state?.nickname ??
-            state?.discordUsername ??
-            state?.discord_username ??
-            state?.username ??
-            ''
-        );
-
-        const rolePrefix = getRolePrefix(state, serverNickname);
+        const rolePrefix = getRolePrefix(state);
         const customPrefix = getCustomPrefix();
         const prefix = customPrefix || rolePrefix;
 
@@ -343,20 +322,50 @@
                 data: `sessionID=${encodeURIComponent(sessionID)}&steamid=${encodeURIComponent(steamId)}&accept_invite=0`,
                 onload: response => {
                     const text = String(response.responseText || '').toLowerCase();
-                    if (response.status >= 200 && response.status < 300) {
+                    let data = null;
+                    try {
+                        data = JSON.parse(response.responseText || '{}');
+                    } catch {}
+
+                    if (response.status < 200 || response.status >= 300) {
+                        if (/already|pending|request/.test(text)) {
+                            state[steamId] = Date.now();
+                            writeFriendRequestState(state);
+                            resolve('pending');
+                            return;
+                        }
+                        reject(new Error(`Steam friend request failed for ${steamId}.`));
+                        return;
+                    }
+
+                    // Steam's AddFriendAjax success response normally includes
+                    // success: 1 and the invited Steam ID. Only persist the
+                    // 24-hour cooldown after Steam actually reports success or
+                    // an explicit already/pending state.
+                    const invited = Array.isArray(data?.invited)
+                        ? data.invited.map(value => String(value))
+                        : [];
+                    const sentSuccessfully = Number(data?.success) === 1 && invited.includes(String(steamId));
+                    const explicitlyPending = /already|pending|request/.test(text);
+
+                    if (sentSuccessfully) {
                         state[steamId] = Date.now();
                         writeFriendRequestState(state);
-                        if (/already|pending|request|friend/.test(text)) return resolve('pending');
-                        return resolve('sent');
+                        resolve('sent');
+                        return;
                     }
-                    if (/already|pending|request/.test(text)) {
+
+                    if (explicitlyPending) {
                         state[steamId] = Date.now();
                         writeFriendRequestState(state);
-                        return resolve('pending');
+                        resolve('pending');
+                        return;
                     }
-                    reject(new Error(`Steam friend request failed for ${steamId}.`));
+
+                    reject(new Error(`Steam did not confirm the friend request for ${steamId}.`));
                 },
-                onerror: () => reject(new Error(`Steam friend request failed for ${steamId}.`))
+                onerror: () => reject(new Error(`Steam friend request failed for ${steamId}.`)),
+                ontimeout: () => reject(new Error(`Steam friend request timed out for ${steamId}.`))
             });
         });
     }

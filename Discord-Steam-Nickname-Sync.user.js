@@ -618,7 +618,7 @@
             #discord-steam-sync-body{padding:12px}
             #discord-steam-sync-panel button:not(#discord-steam-sync-close){width:100%;margin:0 0 8px;padding:9px 10px;border:0;border-radius:3px;background:#66c0f4;color:#10212d;font-weight:700;cursor:pointer}
             #discord-steam-sync-panel button:not(#discord-steam-sync-close):hover{filter:brightness(1.08)}
-            #discord-steam-sync-setup{background:#183a63!important;color:#fff!important}
+            #discord-steam-sync-setup{background:#58A864!important;color:#fff!important}
             #discord-steam-sync-clear-friends{background:#d94141!important;color:#fff!important}
             #discord-steam-sync-stop{background:#f2c94c!important;color:#1f1f1f!important}
             #discord-steam-sync-panel button:disabled{opacity:.5;cursor:not-allowed}

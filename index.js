@@ -377,7 +377,10 @@ function getGatewayRetryAfterMs(error) {
 async function fetchGuildMembers(options = {}) {
     const guild = await getGuild();
     const force = options.force !== false;
-    const cacheComplete = guild.members.cache.size >= guild.memberCount;
+    // Treat only an exact cache/member-count match as complete. A cache that
+    // is larger than the current guild count can contain stale entries and
+    // must not be trusted for safety-sensitive operations such as /prune.
+    const cacheComplete = guild.members.cache.size === guild.memberCount;
 
     if (!force) {
         return {
@@ -417,7 +420,7 @@ async function fetchGuildMembers(options = {}) {
         for (let attempt = 1; attempt <= 3; attempt++) {
             try {
                 const members = await guild.members.fetch();
-                const complete = members.size >= guild.memberCount;
+                const complete = members.size === guild.memberCount;
 
                 if (!complete) {
                     throw new Error(
@@ -463,7 +466,16 @@ async function fetchGuildMembers(options = {}) {
 // ============================================================
 
 async function buildNicknameSyncData() {
-    const snapshot = await fetchGuildMembers({ force: false });
+    let snapshot = await fetchGuildMembers({ force: false });
+
+    // Relay generation is asynchronous, so it is safe to perform the one
+    // required full fetch here when startup/member-cache state is incomplete.
+    // Without this, the relay could remain unavailable until another command
+    // happened to trigger a full member fetch.
+    if (!snapshot.complete) {
+        snapshot = await fetchGuildMembers({ force: true });
+    }
+
     if (!snapshot.complete) {
         throw new Error(
             `Discord member cache is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}); keeping the previous relay snapshot.`
@@ -2114,17 +2126,19 @@ async function handleAuditPage(interaction, pageNumber) {
 
 async function scanOnlineMembersForLinkPrompts() {
     try {
-        const snapshot = await fetchGuildMembers({ force: false });
+        let snapshot = await fetchGuildMembers({ force: false });
+
         if (!snapshot.complete) {
             console.warn(
-                `Startup Steam link prompt scan deferred because the member cache is incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}).`
+                `Startup Steam link prompt scan needs a full member fetch (${snapshot.members.size}/${snapshot.guild.memberCount}).`
             );
-            setTimeout(() => {
-                scanOnlineMembersForLinkPrompts().catch(error => {
-                    console.error('Deferred Steam link prompt scan failed:', error);
-                });
-            }, 30_000);
-            return;
+            snapshot = await fetchGuildMembers({ force: true });
+        }
+
+        if (!snapshot.complete) {
+            throw new Error(
+                `Discord member snapshot remains incomplete (${snapshot.members.size}/${snapshot.guild.memberCount}).`
+            );
         }
 
         let checked = 0;

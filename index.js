@@ -967,6 +967,9 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
+        .setName('unlink')
+        .setDescription('Unlink your own Steam ID without removing your roster role.'),
+    new SlashCommandBuilder()
         .setName('remove')
         .setDescription('Remove a user Steam link and roster roles.')
         .addUserOption(option =>
@@ -1276,6 +1279,48 @@ async function handleRosterLinkModal(interaction, targetId) {
     });
 }
 
+async function handleUnlink(interaction) {
+    const link = getLink(interaction.user.id);
+
+    if (!link) {
+        await interaction.reply({
+            content: 'You do not currently have a Steam ID linked.',
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    queueNicknameCleanup(
+        link.steam_id,
+        interaction.user.username,
+        'User unlinked their own Steam link'
+    );
+
+    db.prepare(`
+        DELETE FROM steam_links
+        WHERE discord_id = ?
+    `).run(interaction.user.id);
+
+    db.prepare(`
+        DELETE FROM sync_tokens
+        WHERE discord_id = ?
+    `).run(interaction.user.id);
+
+    addAudit({
+        action: 'UNLINK',
+        actorId: interaction.user.id,
+        targetId: interaction.user.id,
+        oldSteamId: link.steam_id,
+        details: 'User unlinked their own Steam link'
+    });
+
+    await interaction.reply({
+        content: 'Unlinked your Steam ID `' + "${link.steam_id}" + '`. Your Recruit/Gump role was left unchanged, so you can use the **Link** button on the roster to test linking again.',
+        flags: MessageFlags.Ephemeral
+    });
+
+    scheduleRelayPublish();
+}
 async function handleRemove(interaction) {
     if (!isPrivileged(interaction.member)) {
         await interaction.reply({
@@ -2166,6 +2211,10 @@ client.on('interactionCreate', async interaction => {
             switch (interaction.commandName) {
                 case 'link':
                     await handleLink(interaction);
+                    break;
+
+                case 'unlink':
+                    await handleUnlink(interaction);
                     break;
 
                 case 'remove':

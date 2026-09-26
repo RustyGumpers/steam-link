@@ -379,6 +379,7 @@ async function fetchGuildMembers(options = {}) {
     // without repeatedly requesting the entire guild.
     if (
         cacheComplete &&
+        !options.bypassCooldown &&
         lastSuccessfulMemberFetch > 0 &&
         Date.now() - lastSuccessfulMemberFetch < MEMBER_FETCH_COOLDOWN_MS
     ) {
@@ -712,7 +713,13 @@ function getRosterMembersFromCache(roleId) {
 }
 
 async function getFreshRosterMembers(roleId) {
-    const snapshot = await fetchGuildMembers({ force: true });
+    // Roster commands explicitly request a live member snapshot. The relay
+    // publisher keeps its 60-second cooldown, but a roster refresh must not
+    // silently reuse that snapshot or the message can remain marked cached.
+    const snapshot = await fetchGuildMembers({
+        force: true,
+        bypassCooldown: true
+    });
 
     if (!snapshot.complete) {
         throw new Error('Discord member snapshot is incomplete.');

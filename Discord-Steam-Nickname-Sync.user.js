@@ -35,6 +35,7 @@
     const REQUEST_TIMEOUT_MS = 15000;
     const MAX_NICKNAME_LENGTH = 32;
     const FRIEND_REQUEST_MIN_INTERVAL_MS = 1500;
+    const LAST_MISSING_SIGNATURE_KEY = 'discordSteamSyncLastMissingSignatureV1';
 
     let stopRequested = false;
     let syncRunning = false;
@@ -65,6 +66,8 @@
     function getToken() {
         return String(readStoredValue(TOKEN_KEY, '') || '').trim();
     }
+
+    migrateLegacyTokenStorage();
 
     function getCustomPrefix() {
         return trimNickname(readStoredValue(CUSTOM_PREFIX_KEY, '') || '');
@@ -443,12 +446,14 @@
                 );
             }
 
-            const entries = [...desired.entries()].filter(
-                ([steamId, nickname]) =>
-                    steamId !== currentSteamId &&
-                    friends.has(steamId) &&
-                    nickname !== null
-            );
+            const entries = shouldUpdateMatching
+                ? [...desired.entries()].filter(
+                    ([steamId, nickname]) =>
+                        steamId !== currentSteamId &&
+                        friends.has(steamId) &&
+                        nickname !== null
+                )
+                : [];
             let completed = 0;
 
             if (entries.length === 0) {

@@ -244,8 +244,15 @@
         if (!friendBlock) return '';
 
         // Steam's friend blocks expose the persona name in data-search.
-        // Prefer the dedicated persona/name element before using text-line
-        // fallbacks so unrelated status text cannot become the nickname.
+        // Prefer that explicit field because it is tied to the friend entry
+        // itself, then use dedicated persona elements as fallbacks.
+        const dataSearch = String(friendBlock.getAttribute('data-search') || '').trim();
+        if (dataSearch) {
+            const first = dataSearch.split(/\s*;\s*/)[0];
+            const name = trimNickname(first.replace(/^\*+/, ''));
+            if (name) return name;
+        }
+
         const persona = friendBlock.querySelector(
             '.friend_block_content a.friend_block_content_link, ' +
             '.friend_block_content .friend_block_persona, ' +
@@ -258,13 +265,6 @@
                 persona.textContent ||
                 ''
             );
-            if (name) return name;
-        }
-
-        const dataSearch = String(friendBlock.getAttribute('data-search') || '').trim();
-        if (dataSearch) {
-            const first = dataSearch.split(/\s*;\s*/)[0];
-            const name = trimNickname(first.replace(/^\*+/, ''));
             if (name) return name;
         }
 
@@ -307,13 +307,10 @@
     }
 
     function isSteamFriendListRendered() {
-        if (document.querySelector(
-            '#friends_list, .friends_list, .friend_list, ' +
-            '.friend_list_container, .friends_list_container'
-        )) {
-            return true;
-        }
-
+        // Do not treat the generic friends-list container as "loaded": Steam
+        // can create that container before its friend blocks arrive. Only
+        // explicit empty-state text is strong enough to conclude that there
+        // are genuinely zero friends.
         const text = String(document.body?.innerText || '').toLowerCase();
         return (
             text.includes('you have no friends') ||

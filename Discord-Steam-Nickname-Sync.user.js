@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.2.5
+// @version      10.2.6
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -29,6 +29,9 @@
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV11';
     const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
+    const SYNC_LOCK_KEY = 'discordSteamSyncActiveLockV1';
+    const SYNC_LOCK_TTL_MS = 120000;
+    const SYNC_START_COOLDOWN_MS = 30000;
     const NICKNAME_FAILURES_KEY = 'discordSteamSyncNicknameFailuresV1';
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
     const NICKNAME_FAILURE_RETRY_MS = 5 * 60 * 1000;
@@ -156,6 +159,54 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    function getSyncLock() {
+        try {
+            const raw = localStorage.getItem(SYNC_LOCK_KEY);
+            if (!raw) return null;
+            const lock = JSON.parse(raw);
+            return lock && typeof lock === 'object' ? lock : null;
+        } catch { return null; }
+    }
+
+    function getSyncOwnerId() {
+        const key = 'discordSteamSyncInstanceIdV1';
+        try {
+            let id = sessionStorage.getItem(key);
+            if (!id) {
+                id = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+                sessionStorage.setItem(key, id);
+            }
+            return id;
+        } catch { return String(Date.now()) + '-' + Math.random().toString(36).slice(2); }
+    }
+
+    function acquireSyncLock(force = false) {
+        const now = Date.now();
+        const current = getSyncLock();
+        const owner = getSyncOwnerId();
+        if (current && Number(current.expiresAt || 0) > now && current.owner !== owner) return false;
+        if (!force && current && Number(current.cooldownUntil || 0) > now) return false;
+        const lock = { owner, expiresAt: now + SYNC_LOCK_TTL_MS, cooldownUntil: now + SYNC_START_COOLDOWN_MS };
+        try {
+            localStorage.setItem(SYNC_LOCK_KEY, JSON.stringify(lock));
+            return getSyncLock()?.owner === owner;
+        } catch { return true; }
+    }
+
+    function refreshSyncLock() {
+        const lock = getSyncLock();
+        if (!lock || lock.owner !== getSyncOwnerId()) return;
+        lock.expiresAt = Date.now() + SYNC_LOCK_TTL_MS;
+        try { localStorage.setItem(SYNC_LOCK_KEY, JSON.stringify(lock)); } catch {}
+    }
+
+    function releaseSyncLock() {
+        const lock = getSyncLock();
+        if (!lock || lock.owner !== getSyncOwnerId()) return;
+        lock.expiresAt = Date.now();
+        lock.cooldownUntil = Date.now() + SYNC_START_COOLDOWN_MS;
+        try { localStorage.setItem(SYNC_LOCK_KEY, JSON.stringify(lock)); } catch {}
+    }
     function apiRequest(method, url, body = null) {
         const token = getToken();
         if (!token) return Promise.reject(new Error('No sync token is configured.'));
@@ -549,6 +600,10 @@
 
     async function syncNicknames(force = false) {
         if (syncRunning) return;
+        if (!acquireSyncLock(force)) {
+            setStatus('Sync already running elsewhere.', 'Waiting for the active sync to finish.');
+            return;
+        }
         if (!getToken()) {
             setStatus('No sync token configured.');
             return;
@@ -770,6 +825,8 @@
                 setStatus(error.message || 'Sync failed. No automatic nickname clearing was performed.');
             }
         } finally {
+            refreshSyncLock();
+            releaseSyncLock();
             syncRunning = false;
             setButtonDisabled(false);
         }

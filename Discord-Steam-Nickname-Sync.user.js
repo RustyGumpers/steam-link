@@ -9,6 +9,7 @@
 // @updateURL    https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @match        https://steamcommunity.com/my/friends*
+// @match        https://steamcommunity.com/profiles/*/friends*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
@@ -128,7 +129,11 @@
         const path = location.pathname;
         // Nickname changes use the logged-in account's Steam session. Never
         // operate on another user's public friends page.
-        return path === '/my/friends' || path === '/my/friends/';
+        return (
+            path === '/my/friends' ||
+            path === '/my/friends/' ||
+            /^\/profiles\/\d{17}\/friends\/?$/.test(path)
+        );
     }
 
     function setStatus(message, progress = '') {

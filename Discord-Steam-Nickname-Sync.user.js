@@ -34,6 +34,7 @@
     const POLL_INTERVAL_MS = 15000;
     const REQUEST_TIMEOUT_MS = 15000;
     const MAX_NICKNAME_LENGTH = 32;
+    const FRIEND_REQUEST_MIN_INTERVAL_MS = 1500;
 
     let stopRequested = false;
     let syncRunning = false;
@@ -130,9 +131,9 @@
 
     function isFriendsPage() {
         const path = location.pathname;
-        return path === '/my/friends'
-            || path === '/my/friends/'
-            || /^\/profiles\/\d{17}\/friends\/?$/.test(path);
+        // Nickname changes use the logged-in account's Steam session. Never
+        // operate on another user's public friends page.
+        return path === '/my/friends' || path === '/my/friends/';
     }
 
     function setStatus(message, progress = '') {
@@ -404,8 +405,6 @@
 
             const friends = await scanFriends();
             const desired = new Map();
-            const unresolved = [];
-
             for (const state of data.states) {
                 const steamId = getStateSteamId(state);
                 if (!steamId || steamId === currentSteamId) continue;
@@ -419,25 +418,22 @@
                     continue;
                 }
 
-                const steamName = getSteamFriendName(friendBlock);
-                if (!steamName) {
-                    unresolved.push(steamId);
-                    continue;
-                }
+                // The server already supplies the authoritative Discord
+                // nickname. Do not derive it from the friend's current Steam
+                // display name; that name can be unrelated to Discord.
+                const serverNickname = getStateNickname(state);
+                if (!serverNickname) continue;
 
-                if (state?.role) {
-                    desired.set(steamId, applyCustomPrefix(`${state.role} ${steamName}`));
-                } else {
-                    desired.set(steamId, '');
-                }
+                desired.set(
+                    steamId,
+                    applyCustomPrefix(serverNickname)
+                );
             }
 
-            const signature = stateSignature(
-                [...desired.entries()].map(([steamId, nickname]) => ({
-                    steamId,
-                    nickname: nickname || ''
-                }))
-            );
+            const signature = [...desired.entries()]
+                .map(([steamId, nickname]) => `${steamId}|${nickname === null ? '<missing>' : nickname}`)
+                .sort()
+                .join('\n');
             const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
             if (!force && signature === previous) {
                 setStatus('Already synchronized.');
@@ -462,7 +458,7 @@
                     if (stopRequested) throw new Error('Sync stopped.');
                     const result = await sendSteamFriendRequest(steamId);
                     if (result === 'sent') requested++;
-                    await sleep(500);
+                    await sleep(FRIEND_REQUEST_MIN_INTERVAL_MS);
                 }
                 setStatus(
                     `Friend requests: ${requested} new request(s) sent.`,
@@ -486,7 +482,10 @@
                     'No Discord-linked Steam accounts are currently on your Steam Friends list.',
                     `Steam found ${friends.size} friend(s), but none of the ${desired.size} linked Steam IDs matched.${requestedText}`
                 );
-                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature);
+                // Do not mark a missing-only state as fully synchronized.
+                if (!missing.length) {
+                    writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature);
+                }
                 return;
             }
 
@@ -498,7 +497,11 @@
                 await sleep(500);
             }
 
-            writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature);
+            if (missing.length === 0) {
+                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature);
+            } else {
+                removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
+            }
             setStatus(`Sync complete — ${entries.length} nickname(s) updated.`);
             await sleep(2500);
             location.reload();

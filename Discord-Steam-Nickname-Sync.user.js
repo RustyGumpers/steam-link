@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.0
+// @version      10.1.1
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/Discord-steam-link
 // @supportURL   https://github.com/RustyGumpers/Discord-steam-link/issues

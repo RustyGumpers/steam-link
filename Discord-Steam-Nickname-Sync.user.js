@@ -96,8 +96,7 @@
         const html = document.documentElement.innerHTML;
         const patterns = [
             /g_steamID\s*=\s*["'](\d{17})["']/,
-            /g_steamID\s*=\s*"?(\d{17})"?/,
-            /\bsteamid\b[^\d]{0,40}(\d{17})/i
+            /g_steamID\s*=\s*"?(\d{17})"?/
         ];
         for (const pattern of patterns) {
             const match = html.match(pattern);

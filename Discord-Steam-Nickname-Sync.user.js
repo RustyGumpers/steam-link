@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.2
+// @version      10.1.3
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -287,9 +287,6 @@
         const last = Number(state[steamId] || 0);
         if (Date.now() - last < FRIEND_REQUEST_COOLDOWN_MS) return 'throttled';
 
-        state[steamId] = Date.now();
-        writeFriendRequestState(state);
-
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
@@ -299,10 +296,16 @@
                 onload: response => {
                     const text = String(response.responseText || '').toLowerCase();
                     if (response.status >= 200 && response.status < 300) {
+                        state[steamId] = Date.now();
+                        writeFriendRequestState(state);
                         if (/already|pending|request|friend/.test(text)) return resolve('pending');
                         return resolve('sent');
                     }
-                    if (/already|pending|request/.test(text)) return resolve('pending');
+                    if (/already|pending|request/.test(text)) {
+                        state[steamId] = Date.now();
+                        writeFriendRequestState(state);
+                        return resolve('pending');
+                    }
                     reject(new Error(`Steam friend request failed for ${steamId}.`));
                 },
                 onerror: () => reject(new Error(`Steam friend request failed for ${steamId}.`))
@@ -340,15 +343,6 @@
                 onerror: () => reject(new Error(`Steam nickname update failed for ${steamId}.`))
             });
         });
-    }
-
-    function stateSignature(states) {
-        return states
-            .map(item => ({ steamId: getStateSteamId(item), nickname: getStateNickname(item) }))
-            .filter(item => item.steamId && item.nickname)
-            .sort((a, b) => a.steamId.localeCompare(b.steamId))
-            .map(item => `${item.steamId}|${item.nickname}`)
-            .join('\n');
     }
 
     async function syncNicknames(force = false) {

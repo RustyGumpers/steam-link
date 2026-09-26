@@ -1301,11 +1301,6 @@ async function handleUnlink(interaction) {
         WHERE discord_id = ?
     `).run(interaction.user.id);
 
-    db.prepare(`
-        DELETE FROM sync_tokens
-        WHERE discord_id = ?
-    `).run(interaction.user.id);
-
     addAudit({
         action: 'UNLINK',
         actorId: interaction.user.id,

@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.2.2
+// @version      10.2.3
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -28,6 +28,7 @@
     const CUSTOM_PREFIX_KEY = 'discordSteamSyncCustomPrefixV1';
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV11';
     const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
+    const POST_SYNC_RELOAD_KEY = 'discordSteamSyncPostSyncReloadV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
     const NICKNAME_FAILURES_KEY = 'discordSteamSyncNicknameFailuresV1';
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -741,6 +742,10 @@
             if (fullySuccessful) {
                 writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, completedSignature);
                 removeStoredValue(RESYNC_AFTER_CLEAR_KEY);
+                // Mark this reload as an intentional post-sync reload. The
+                // startup handler consumes this marker so the same successful
+                // sync is not immediately started again after page refresh.
+                writeStoredValue(POST_SYNC_RELOAD_KEY, String(Date.now()));
                 setStatus(`Sync complete — ${completed} nickname(s) updated.`, 'All linked Steam nicknames are synchronized.');
                 await sleep(2500);
                 location.reload();
@@ -970,6 +975,18 @@
 
     setTimeout(() => {
         if (!getToken() || !isFriendsPage()) return;
+
+        const postSyncReloadAt = Number(readStoredValue(POST_SYNC_RELOAD_KEY, '') || 0);
+        if (postSyncReloadAt > 0) {
+            removeStoredValue(POST_SYNC_RELOAD_KEY);
+            if (Date.now() - postSyncReloadAt < 60000) {
+                setStatus('Sync complete. Waiting for changes…', 'Automatic sync is paused briefly after the page refresh.');
+                return;
+            }
+            // A stale marker should never suppress normal synchronization.
+            // Clear it and continue with the regular startup check.
+            removeStoredValue(POST_SYNC_RELOAD_KEY);
+        }
 
         const resyncAfterClear = String(readStoredValue(RESYNC_AFTER_CLEAR_KEY, '') || '') === '1';
         if (resyncAfterClear) {

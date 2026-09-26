@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.1.7
+// @version      10.1.8
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -271,14 +271,22 @@
     }
 
     function buildFinalNickname(state, friendBlock) {
-        const steamName = getSteamDisplayName(friendBlock);
-        if (!steamName) return '';
-
         const rolePrefix = getRolePrefix(state);
-        const customPrefix = getCustomPrefix();
-        const prefix = customPrefix || rolePrefix;
 
-        return trimNickname(prefix ? `${prefix} ${steamName}` : steamName);
+        // Roster members use their current Steam display name. This makes
+        // Steam-name changes part of the synchronization signature.
+        if (rolePrefix) {
+            const steamName = getSteamDisplayName(friendBlock);
+            if (!steamName) return '';
+
+            const customPrefix = getCustomPrefix();
+            const prefix = customPrefix || rolePrefix;
+            return trimNickname(`${prefix} ${steamName}`);
+        }
+
+        // Users who are no longer Recruit/Gump retain the bot's authoritative
+        // plain Discord username, matching the server's cleanup state.
+        return trimNickname(state?.nickname || '');
     }
 
     async function scanFriends() {

@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      10.2.6
+// @version      10.2.7
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -547,6 +547,32 @@
         });
     }
 
+    function sanitizeNicknameResponseText(value) {
+        return String(value || '')
+            .replace(/Bearer\\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
+            .replace(/sessionid=[^&\\s"'<>]*/gi, 'sessionid=[redacted]')
+            .replace(/token[=:][^\\s&,;"'<>]+/gi, 'token=[redacted]')
+            .slice(0, 600);
+    }
+
+    function buildNicknameRequestError(steamId, response, parsedData = null) {
+        const status = Number(response?.status || 0);
+        const statusText = String(response?.statusText || '').trim();
+        const finalUrl = String(response?.finalUrl || '').trim();
+        const responseText = sanitizeNicknameResponseText(response?.responseText || '');
+        const success = parsedData && Object.prototype.hasOwnProperty.call(parsedData, 'success') ? parsedData.success : undefined;
+        const serverMessage = parsedData?.error ?? parsedData?.message ?? parsedData?.msg ?? parsedData?.result ?? '';
+        const detail = [
+            `Steam nickname update failed for ${steamId}.`,
+            `HTTP ${status}${statusText ? ` ${statusText}` : ''}.`,
+            success !== undefined ? `success=${String(success)}.` : '',
+            serverMessage ? `message=${sanitizeNicknameResponseText(serverMessage)}.` : '',
+            responseText ? `response=${responseText}` : '',
+            finalUrl ? `finalUrl=${finalUrl}` : ''
+        ].filter(Boolean).join(' ');
+        return new Error(detail);
+    }
+
     async function setSteamNickname(steamId, nickname) {
         const sessionID = getSessionId();
         if (!sessionID) throw new Error('Steam session ID was not found.');
@@ -573,23 +599,20 @@
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
                 data: `nickname=${encodeURIComponent(trimNickname(nickname))}&sessionid=${encodeURIComponent(sessionID)}`,
                 onload: response => {
-                    if (response.status < 200 || response.status >= 300) {
-                        finish(reject, new Error(`Steam nickname update failed for ${steamId} (HTTP ${response.status}).`));
-                        return;
-                    }
-                    try {
-                        const data = JSON.parse(response.responseText || '{}');
-                        if (Number(data.success) !== 1) {
-                            finish(reject, new Error(`Steam nickname update failed for ${steamId}.`));
-                            return;
-                        }
-                    } catch {
-                        finish(reject, new Error(`Steam nickname update returned invalid data for ${steamId}.`));
+                    let data = null;
+                    try { data = JSON.parse(response.responseText || '{}'); } catch {}
+                    if (response.status < 200 || response.status >= 300 || !data || Number(data.success) !== 1) {
+                        finish(reject, buildNicknameRequestError(steamId, response, data));
                         return;
                     }
                     finish(resolve);
                 },
-                onerror: () => finish(reject, new Error(`Steam nickname update failed for ${steamId}.`)),
+                onerror: response => {
+                    const detail = response?.responseText
+                        ? buildNicknameRequestError(steamId, response)
+                        : new Error(`Steam nickname update network request failed for ${steamId}.`);
+                    finish(reject, detail);
+                },
                 onabort: () => finish(reject, new Error('Nickname update aborted.')),
                 ontimeout: () => finish(reject, new Error(`Steam nickname update timed out for ${steamId}.`))
             });
@@ -732,6 +755,7 @@
 
             let completed = 0;
             let failedNicknames = [];
+            let failedNicknameDetails = [];
             let deferredNicknames = [];
 
             for (const [steamId, nickname] of entries) {
@@ -751,9 +775,14 @@
                     await setSteamNickname(steamId, nickname);
                     clearNicknameFailure(steamId);
                     completed++;
-                } catch {
+                } catch (error) {
                     recordNicknameFailure(steamId);
                     failedNicknames.push(steamId);
+                    const detail = error instanceof Error ? error.message : String(error || 'Unknown error');
+                    failedNicknameDetails.push({ steamId, detail });
+                    if (failedNicknameDetails.length <= 5) {
+                        console.warn('[Discord Steam Sync] Nickname update failed:', { steamId, detail });
+                    }
                 }
 
                 await sleep(500);
@@ -769,11 +798,12 @@
             }
 
             if (failedNicknames.length) {
-                const listed = failedNicknames.slice(0, 5).join(', ');
-                const suffix = failedNicknames.length > 5 ? '…' : '';
+                const listed = failedNicknameDetails
+                    .map(item => `${item.steamId}: ${item.detail}`)
+                    .join(' | ');
                 setStatus(
                     'Sync finished with nickname update failures.',
-                    `${failedNicknames.length} nickname(s) failed and will be retried: ${listed}${suffix}`
+                    `${failedNicknames.length} nickname(s) failed. First failures: ${listed}`
                 );
             }
 

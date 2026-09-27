@@ -256,17 +256,32 @@
     function getSteamDisplayName(block) {
         if (!block) return '';
 
+        // Steam's Friends page can render the same friend with different
+        // containers/classes. Prefer the dedicated display-name elements,
+        // then fall back to the profile link text. The profile link is the
+        // friend's actual Steam display name and remains available after a
+        // local nickname has been removed.
         const selectors = [
             '.friendname',
             '.friendName',
             '.persona_name',
             '.friend_block_content .friendname',
-            '.friend_block_content .friendName'
+            '.friend_block_content .friendName',
+            '.friend_block_content a[href*="/profiles/"]',
+            'a[href*="/profiles/"]'
         ];
 
         for (const selector of selectors) {
             const element = block.querySelector?.(selector);
             const name = trimNickname(element?.textContent || '');
+            if (name) return name;
+        }
+
+        // If the block itself is a profile link, use its text as the final
+        // fallback. This covers Steam markup where the friend block is not
+        // wrapped in one of the older friend_block classes.
+        if (block.matches?.('a[href*="/profiles/"]')) {
+            const name = trimNickname(block.textContent || '');
             if (name) return name;
         }
 

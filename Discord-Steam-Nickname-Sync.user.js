@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.1
+// @version      11.2
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/Discord-steam-link
 // @supportURL   https://github.com/RustyGumpers/Discord-steam-link/issues
@@ -256,11 +256,18 @@
     function getSteamDisplayName(block) {
         if (!block) return '';
 
-        // Steam's Friends page can render the same friend with different
-        // containers/classes. Prefer the dedicated display-name elements,
-        // then fall back to the profile link text. The profile link is the
-        // friend's actual Steam display name and remains available after a
-        // local nickname has been removed.
+        // Steam's current Friends-page friend entries commonly expose the
+        // real profile/display name through data-search. Local nicknames are
+        // separate from the Steam persona name, so this remains available
+        // after Remove All Friend Nicknames clears the local nickname.
+        const searchName = trimNickname(
+            block.getAttribute?.('data-search')?.split(' ;')[0] ||
+            block.getAttribute?.('data-search') ||
+            ''
+        );
+        if (searchName) return searchName;
+
+        // Support the other Steam friend-list layouts as fallbacks.
         const selectors = [
             '.friendname',
             '.friendName',
@@ -277,9 +284,6 @@
             if (name) return name;
         }
 
-        // If the block itself is a profile link, use its text as the final
-        // fallback. This covers Steam markup where the friend block is not
-        // wrapped in one of the older friend_block classes.
         if (block.matches?.('a[href*="/profiles/"]')) {
             const name = trimNickname(block.textContent || '');
             if (name) return name;

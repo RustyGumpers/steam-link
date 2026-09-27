@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11
+// @version      11.1
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/Discord-steam-link
 // @supportURL   https://github.com/RustyGumpers/Discord-steam-link/issues
@@ -253,6 +253,41 @@
         );
     }
 
+    function getSteamDisplayName(block) {
+        if (!block) return '';
+
+        const selectors = [
+            '.friendname',
+            '.friendName',
+            '.persona_name',
+            '.friend_block_content .friendname',
+            '.friend_block_content .friendName'
+        ];
+
+        for (const selector of selectors) {
+            const element = block.querySelector?.(selector);
+            const name = trimNickname(element?.textContent || '');
+            if (name) return name;
+        }
+
+        return '';
+    }
+
+    function buildSteamNickname(state, block) {
+        const steamName = getSteamDisplayName(block);
+        if (!steamName) {
+            throw new Error('Could not read a Steam display name for one of the matching friends.');
+        }
+
+        const discordNickname = getStateNickname(state);
+        const roleMatch = discordNickname.match(/^(Gump|Recruit)\s+/i);
+        const rolePrefix = roleMatch ? roleMatch[1] : '';
+
+        return applyCustomPrefix(
+            rolePrefix ? rolePrefix + ' ' + steamName : steamName
+        );
+    }
+
     async function scanFriends() {
         for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
             if (stopRequested) throw new Error('Sync stopped.');
@@ -391,12 +426,20 @@
             }
 
             const friends = await scanFriends();
-            const desired = new Map();
+            const stateBySteamId = new Map();
             for (const state of data.states) {
                 const steamId = getStateSteamId(state);
                 const nickname = getStateNickname(state);
                 if (!steamId || !nickname) continue;
-                desired.set(steamId, applyCustomPrefix(nickname));
+                stateBySteamId.set(steamId, state);
+            }
+
+            const desired = new Map();
+            for (const [steamId, state] of stateBySteamId.entries()) {
+                if (steamId === currentSteamId) continue;
+                const block = friends.get(steamId);
+                if (!block) continue;
+                desired.set(steamId, buildSteamNickname(state, block));
             }
 
             const matching = [...desired.keys()].filter(steamId => steamId !== currentSteamId && friends.has(steamId));

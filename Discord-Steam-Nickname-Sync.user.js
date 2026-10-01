@@ -7,7 +7,7 @@
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
 // @updateURL    https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
-// @downloadURL  https://raw.githubusercontent.com/RustyGumpers/Discord-steam-link/main/Discord-Steam-Nickname-Sync.user.js
+// @downloadURL  https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @match        https://steamcommunity.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle

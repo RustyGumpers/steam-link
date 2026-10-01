@@ -2,11 +2,11 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.2
+// @version      11.3
 // @description  Sync Steam friend local nicknames from Discord roles.
-// @homepageURL  https://github.com/RustyGumpers/Discord-steam-link
-// @supportURL   https://github.com/RustyGumpers/Discord-steam-link/issues
-// @updateURL    https://raw.githubusercontent.com/RustyGumpers/Discord-steam-link/main/Discord-Steam-Nickname-Sync.user.js
+// @homepageURL  https://github.com/RustyGumpers/steam-link
+// @supportURL   https://github.com/RustyGumpers/steam-link/issues
+// @updateURL    https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/RustyGumpers/Discord-steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @match        https://steamcommunity.com/*
 // @grant        GM_xmlhttpRequest
@@ -617,22 +617,53 @@
         syncNicknames(true).catch(error => setStatus(error.message || 'Token test failed.'));
     }
 
-    function buildUI() {
-        if (document.querySelector('#discord-steam-sync-panel')) return;
+    let uiObserver = null;
+    let uiRetryTimer = null;
+    let uiStyleInjected = false;
 
-        GM_addStyle(`
-            #discord-steam-sync-panel{position:fixed;right:18px;bottom:18px;z-index:999999;width:310px;background:#171d25;color:#d6d7d8;border:1px solid #3b4450;border-radius:6px;box-shadow:0 8px 30px rgba(0,0,0,.55);font:14px Arial,sans-serif}
-            #discord-steam-sync-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#1b2838;border-bottom:1px solid #3b4450;font-weight:700}
-            #discord-steam-sync-close{background:none!important;border:0!important;color:#aaa!important;font-size:18px!important;cursor:pointer!important;padding:0 4px!important}
-            #discord-steam-sync-body{padding:12px}
-            #discord-steam-sync-panel button:not(#discord-steam-sync-close){width:100%;margin:0 0 8px;padding:9px 10px;border:0;border-radius:3px;background:#66c0f4;color:#10212d;font-weight:700;cursor:pointer}
-            #discord-steam-sync-panel button:not(#discord-steam-sync-close):hover{filter:brightness(1.08)}
-            #discord-steam-sync-setup{background:#61B827!important;color:#ffffff!important}\n            #discord-steam-sync-clear-friends{background:#d94141!important;color:#fff!important}
-            #discord-steam-sync-stop{background:#f2c94c!important;color:#1f1f1f!important}
-            #discord-steam-sync-panel button:disabled{opacity:.5;cursor:not-allowed}
-            #discord-steam-sync-status{margin-top:4px;line-height:1.35;min-height:38px;color:#d7d7d7}
-            #discord-steam-sync-progress{margin-top:5px;color:#8f98a0;font-size:12px}
-        `);
+    const UI_CSS = `
+        #discord-steam-sync-panel{position:fixed!important;right:18px!important;bottom:18px!important;z-index:2147483647!important;width:310px!important;background:#171d25!important;color:#d6d7d8!important;border:1px solid #3b4450!important;border-radius:6px!important;box-shadow:0 8px 30px rgba(0,0,0,.55)!important;font:14px Arial,sans-serif!important;display:block!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important}
+        #discord-steam-sync-header{display:flex!important;align-items:center!important;justify-content:space-between!important;padding:10px 12px!important;background:#1b2838!important;border-bottom:1px solid #3b4450!important;font-weight:700!important}
+        #discord-steam-sync-close{background:none!important;border:0!important;color:#aaa!important;font-size:18px!important;cursor:pointer!important;padding:0 4px!important}
+        #discord-steam-sync-body{padding:12px!important}
+        #discord-steam-sync-panel button:not(#discord-steam-sync-close){width:100%!important;margin:0 0 8px!important;padding:9px 10px!important;border:0!important;border-radius:3px!important;background:#66c0f4!important;color:#10212d!important;font-weight:700!important;cursor:pointer!important;box-sizing:border-box!important}
+        #discord-steam-sync-panel button:not(#discord-steam-sync-close):hover{filter:brightness(1.08)!important}
+        #discord-steam-sync-setup{background:#61B827!important;color:#ffffff!important}
+        #discord-steam-sync-clear-friends{background:#d94141!important;color:#fff!important}
+        #discord-steam-sync-stop{background:#f2c94c!important;color:#1f1f1f!important}
+        #discord-steam-sync-panel button:disabled{opacity:.5!important;cursor:not-allowed!important}
+        #discord-steam-sync-status{margin-top:4px!important;line-height:1.35!important;min-height:38px!important;color:#d7d7d7!important}
+        #discord-steam-sync-progress{margin-top:5px!important;color:#8f98a0!important;font-size:12px!important}
+    `;
+
+    function injectUIStyle() {
+        if (uiStyleInjected) return;
+        try {
+            if (typeof GM_addStyle === 'function') GM_addStyle(UI_CSS);
+            else throw new Error('GM_addStyle unavailable');
+            uiStyleInjected = true;
+        } catch {
+            if (!document.getElementById('discord-steam-sync-style')) {
+                const style = document.createElement('style');
+                style.id = 'discord-steam-sync-style';
+                style.textContent = UI_CSS;
+                (document.head || document.documentElement).appendChild(style);
+            }
+            uiStyleInjected = true;
+        }
+    }
+
+    function buildUI() {
+        injectUIStyle();
+        if (!document.body) return false;
+
+        const existing = document.querySelector('#discord-steam-sync-panel');
+        if (existing) return true;
+
+        const panel = document.createElement('div');
+        panel.id = 'discord-steam-sync-panel';
+        panel.innerHTML = `
+        `;
 
         const panel = document.createElement('div');
         panel.id = 'discord-steam-sync-panel';
@@ -671,6 +702,26 @@
                 if (!getToken()) setupToken();
             }, 500);
         }
+
+        return true;
+    }
+
+    function ensureUI() {
+        if (document.querySelector('#discord-steam-sync-panel')) return;
+        if (buildUI()) return;
+
+        clearTimeout(uiRetryTimer);
+        uiRetryTimer = setTimeout(ensureUI, 250);
+    }
+
+    function startUIObserver() {
+        ensureUI();
+
+        if (uiObserver || !document.documentElement) return;
+        uiObserver = new MutationObserver(() => {
+            if (!document.querySelector('#discord-steam-sync-panel')) ensureUI();
+        });
+        uiObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
 
     function startPolling() {
@@ -681,12 +732,27 @@
         }, POLL_INTERVAL_MS);
     }
 
-    GM_registerMenuCommand('Set Discord Steam Sync Token', setupToken);
-    GM_registerMenuCommand('Set Custom Nickname Prefix', setupCustomPrefix);
-    GM_registerMenuCommand('Sync All Nicknames', () => syncNicknames(true));
-    GM_registerMenuCommand('Remove All Friend Nicknames', clearAllFriendNicknames);
+    function registerMenuCommands() {
+        const commands = [
+            ['Set Discord Steam Sync Token', setupToken],
+            ['Set Custom Nickname Prefix', setupCustomPrefix],
+            ['Sync All Nicknames', () => syncNicknames(true)],
+            ['Remove All Friend Nicknames', clearAllFriendNicknames]
+        ];
 
-    buildUI();
+        for (const [name, callback] of commands) {
+            try {
+                if (typeof GM_registerMenuCommand === 'function') {
+                    GM_registerMenuCommand(name, callback);
+                }
+            } catch (error) {
+                console.warn('[Discord Steam Sync] Menu registration failed:', error);
+            }
+        }
+    }
+
+    registerMenuCommands();
+    startUIObserver();
     startPolling();
 
     setTimeout(() => {

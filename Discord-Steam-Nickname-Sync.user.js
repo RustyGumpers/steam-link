@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.3
+// @version      11.4
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -659,11 +659,6 @@
 
         const existing = document.querySelector('#discord-steam-sync-panel');
         if (existing) return true;
-
-        const panel = document.createElement('div');
-        panel.id = 'discord-steam-sync-panel';
-        panel.innerHTML = `
-        `;
 
         const panel = document.createElement('div');
         panel.id = 'discord-steam-sync-panel';

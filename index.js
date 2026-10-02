@@ -2031,12 +2031,31 @@ function wasPromptedToday(discordId) {
 
 async function sendSteamLinkPrompt(member) {
     if (!member || member.user?.bot) return false;
-    if (!hasRosterRole(member)) return false;
-    if (getLink(member.id)) return false;
-    if (wasPromptedToday(member.id)) return false;
-    if (linkPromptInFlight.has(member.id)) return false;
 
-    linkPromptInFlight.add(member.id);
+    // Always refresh the member from Discord before deciding whether to send
+    // a link prompt. Presence/member events can contain a stale role cache,
+    // and this DM must ONLY go to current Gump or Recruit members.
+    let currentMember = member;
+
+    try {
+        if (member.guild?.members?.fetch && member.id) {
+            currentMember = await member.guild.members.fetch(member.id);
+        }
+    } catch (error) {
+        console.warn(
+            'Could not refresh member roles before Steam link prompt for ' +
+            (member.user?.username || member.id) + ': ' + (error.message || error)
+        );
+        return false;
+    }
+
+    if (currentMember.user?.bot) return false;
+    if (!hasRosterRole(currentMember)) return false;
+    if (getLink(currentMember.id)) return false;
+    if (wasPromptedToday(currentMember.id)) return false;
+    if (linkPromptInFlight.has(currentMember.id)) return false;
+
+    linkPromptInFlight.add(currentMember.id);
 
     const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -2047,7 +2066,7 @@ async function sendSteamLinkPrompt(member) {
     );
 
     try {
-        await member.send({
+        await currentMember.send({
             content:
                 '⚠️ **You are not linked to Steam yet.**\n\n' +
                 'Please link your Steam account using the button below.\n\n' +
@@ -2066,11 +2085,11 @@ async function sendSteamLinkPrompt(member) {
         return true;
     } catch (error) {
         console.warn(
-            'Could not DM Steam link prompt to ' + member.user.username + ' (' + member.id + '): ' + (error.message || error)
+            'Could not DM Steam link prompt to ' + currentMember.user.username + ' (' + currentMember.id + '): ' + (error.message || error)
         );
         return false;
     } finally {
-        linkPromptInFlight.delete(member.id);
+        linkPromptInFlight.delete(currentMember.id);
     }
 }
 

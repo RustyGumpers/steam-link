@@ -626,9 +626,9 @@
         #discord-steam-sync-header{display:flex!important;align-items:center!important;justify-content:space-between!important;padding:10px 12px!important;background:#1b2838!important;border-bottom:1px solid #3b4450!important;font-weight:700!important}
         #discord-steam-sync-close{background:none!important;border:0!important;color:#aaa!important;font-size:18px!important;cursor:pointer!important;padding:0 4px!important}
         #discord-steam-sync-body{padding:12px!important}
-        #discord-steam-sync-panel button:not(#discord-steam-sync-close){width:100%!important;margin:0 0 8px!important;padding:9px 10px!important;border:0!important;border-radius:3px!important;background:#66c0f4!important;color:#10212d!important;font-weight:700!important;cursor:pointer!important;box-sizing:border-box!important}
+        #discord-steam-sync-panel button:not(#discord-steam-sync-close){width:100%!important;margin:0 0 8px!important;padding:9px 10px!important;border:0!important;border-radius:3px!important;background:#58A864!important;color:#ffffff!important;font-weight:700!important;cursor:pointer!important;box-sizing:border-box!important}
         #discord-steam-sync-panel button:not(#discord-steam-sync-close):hover{filter:brightness(1.08)!important}
-        #discord-steam-sync-setup{background:#61B827!important;color:#ffffff!important}
+        #discord-steam-sync-setup{background:#58A864!important;color:#ffffff!important}
         #discord-steam-sync-clear-friends{background:#d94141!important;color:#fff!important}
         #discord-steam-sync-stop{background:#f2c94c!important;color:#1f1f1f!important}
         #discord-steam-sync-panel button:disabled{opacity:.5!important;cursor:not-allowed!important}

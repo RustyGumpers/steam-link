@@ -1,0 +1,14 @@
+{
+  "name": "discord-server-activity-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tracks member activity inside a Discord server.",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=18.0.0" },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "discord.js": "^14.27.0",
+    "dotenv": "^17.2.2"
+  }
+}

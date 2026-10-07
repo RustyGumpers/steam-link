@@ -518,10 +518,15 @@
                 );
             }
 
-            for (const [steamId, nickname] of entries) {
+            for (const [steamId, state] of entries) {
                 if (stopRequested) throw new Error('Sync stopped.');
                 completed++;
                 setStatus('Syncing nicknames…', `Processing ${completed} / ${entries.length}`);
+
+                // Build the actual nickname from the Discord role and the
+                // current Steam display name. Do not pass the whole state
+                // object to setSteamNickname, which would become [object Object].
+                const nickname = buildSteamNickname(state, friends.get(steamId));
                 await setSteamNickname(steamId, nickname);
                 await sleep(500);
             }

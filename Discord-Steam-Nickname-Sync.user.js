@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.4
+// @version      11.5
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -453,37 +453,59 @@
                 stateBySteamId.set(steamId, state);
             }
 
+            // Only active roster members should receive nickname syncs or
+            // automatic Steam friend requests. The relay also contains "clear"
+            // states for linked users who lost their Recruit/Gump role, left
+            // Discord, or were otherwise queued for nickname cleanup.
             const desired = new Map();
             for (const [steamId, state] of stateBySteamId.entries()) {
                 if (steamId === currentSteamId) continue;
-                const block = friends.get(steamId);
-                if (!block) continue;
-                desired.set(steamId, buildSteamNickname(state, block));
+
+                const role = String(state?.role || '').trim();
+                if (role !== 'Gump' && role !== 'Recruit') continue;
+
+                desired.set(steamId, state);
             }
 
-            const matching = [...desired.keys()].filter(steamId => steamId !== currentSteamId && friends.has(steamId));
+            const matching = [...desired.keys()]
+                .filter(steamId => friends.has(steamId));
+
             setStatus(
-                `Found ${friends.size} Steam friend(s) and ${desired.size} Discord-linked friend(s).`,
+                `Found ${friends.size} Steam friend(s) and ${desired.size} linked roster member(s).`,
                 `${matching.length} matching friend(s) ready to update.`
             );
 
-            const missing = [];
-            for (const steamId of desired.keys()) {
-                if (steamId === currentSteamId) continue;
-                if (!friends.has(steamId)) missing.push(steamId);
-            }
+            // Compare the complete Discord roster against the complete Steam
+            // friend list. Previously `missing` was derived only after entries
+            // had already been filtered to friends, so it was always empty.
+            const missing = [...desired.keys()]
+                .filter(steamId => !friends.has(steamId));
 
             if (missing.length) {
                 let requested = 0;
+                let alreadyPending = 0;
+                let throttled = 0;
+                let requestFailed = 0;
+
                 for (const steamId of missing) {
                     if (stopRequested) throw new Error('Sync stopped.');
-                    const result = await sendSteamFriendRequest(steamId);
-                    if (result === 'sent') requested++;
+
+                    try {
+                        const result = await sendSteamFriendRequest(steamId);
+                        if (result === 'sent') requested++;
+                        else if (result === 'pending') alreadyPending++;
+                        else if (result === 'throttled') throttled++;
+                    } catch (error) {
+                        requestFailed++;
+                        console.warn('[Discord Steam Sync] Auto friend request failed:', steamId, error);
+                    }
+
                     await sleep(500);
                 }
+
                 setStatus(
-                    `Requested ${requested} missing friend(s).`,
-                    `${missing.length} Discord-linked friend(s) are not currently on your Steam friends list.`
+                    `Auto friend requests: ${requested} sent, ${alreadyPending} already pending, ${throttled} on cooldown, ${requestFailed} failed.`,
+                    `${missing.length} linked Gump/Recruit member(s) were not currently on your Steam friends list.`
                 );
             }
 

@@ -397,13 +397,14 @@ async function fetchGuildMembers(options = {}) {
     // updated by normal member events, so callers still see current data
     // without repeatedly requesting the entire guild.
     if (
+        cacheComplete &&
         lastSuccessfulMemberFetch > 0 &&
         Date.now() - lastSuccessfulMemberFetch < MEMBER_FETCH_COOLDOWN_MS
     ) {
         return {
             guild,
             members: guild.members.cache,
-            complete: cacheComplete,
+            complete: true,
             fetched: false
         };
     }
@@ -416,18 +417,44 @@ async function fetchGuildMembers(options = {}) {
     }
 
     memberFetchPromise = (async () => {
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        const maxAttempts = 3;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const cacheSizeBefore = guild.members.cache.size;
+            const expectedCount = guild.memberCount;
+
+            console.log(
+                `[MemberFetch] Starting attempt ${attempt}/${maxAttempts}; ` +
+                `guild=${guild.id}; expected=${expectedCount}; ` +
+                `cacheBefore=${cacheSizeBefore}; cacheComplete=${cacheSizeBefore === expectedCount}.`
+            );
+
             try {
                 const members = await guild.members.fetch();
                 const complete = members.size === guild.memberCount;
 
+                console.log(
+                    `[MemberFetch] Attempt ${attempt}/${maxAttempts} returned; ` +
+                    `guild=${guild.id}; expected=${guild.memberCount}; ` +
+                    `returned=${members.size}; cacheAfter=${guild.members.cache.size}; ` +
+                    `complete=${complete}.`
+                );
+
                 if (!complete) {
-                    throw new Error(
-                        `Discord member snapshot incomplete (${members.size}/${guild.memberCount}).`
+                    const missing = Math.max(0, guild.memberCount - members.size);
+                    const error = new Error(
+                        `Discord member snapshot incomplete (${members.size}/${guild.memberCount}; missing=${missing}).`
                     );
+                    error.code = 'INCOMPLETE_MEMBER_SNAPSHOT';
+                    throw error;
                 }
 
                 lastSuccessfulMemberFetch = Date.now();
+
+                console.log(
+                    `[MemberFetch] Complete snapshot accepted; guild=${guild.id}; ` +
+                    `members=${members.size}; attempt=${attempt}/${maxAttempts}.`
+                );
 
                 return {
                     guild,
@@ -436,28 +463,35 @@ async function fetchGuildMembers(options = {}) {
                     fetched: true
                 };
             } catch (error) {
-                // An incomplete snapshot is a safety failure, not a reason to
-                // immediately issue another full opcode-8 request. Retrying
-                // that condition can collide with Discord's per-guild rate
-                // limit and still would not make /prune safe.
-                if (
-                    String(error?.message || '')
-                        .startsWith('Discord member snapshot incomplete')
-                ) {
-                    throw error;
-                }
-
                 const retryAfterMs = getGatewayRetryAfterMs(error);
+                const isIncompleteSnapshot =
+                    error?.code === 'INCOMPLETE_MEMBER_SNAPSHOT' ||
+                    String(error?.message || '').startsWith('Discord member snapshot incomplete');
 
-                if (attempt === 3) {
+                console.error(
+                    `[MemberFetch] Attempt ${attempt}/${maxAttempts} failed; ` +
+                    `guild=${guild.id}; cache=${guild.members.cache.size}/${guild.memberCount}; ` +
+                    `kind=${isIncompleteSnapshot ? 'incomplete-snapshot' : 'fetch-error'}; ` +
+                    `code=${error?.code ?? 'none'}; status=${error?.status ?? error?.httpStatus ?? 'none'}; ` +
+                    `retryAfterMs=${retryAfterMs}; message=${error?.message || String(error)}`
+                );
+
+                if (attempt === maxAttempts) {
                     throw error;
                 }
 
-                await sleep(
-                    retryAfterMs > 0
-                        ? retryAfterMs + 500
-                        : 1500 * attempt
+                // Do not let the successful-fetch cooldown block recovery from
+                // an incomplete cache. Retry with backoff; respect any Gateway
+                // retry_after value supplied by Discord.
+                const backoffMs = retryAfterMs > 0
+                    ? retryAfterMs + 500
+                    : (isIncompleteSnapshot ? 2000 * attempt : 1500 * attempt);
+
+                console.warn(
+                    `[MemberFetch] Retrying in ${backoffMs}ms; ` +
+                    `guild=${guild.id}; nextAttempt=${attempt + 1}/${maxAttempts}.`
                 );
+                await sleep(backoffMs);
             }
         }
 

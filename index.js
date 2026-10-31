@@ -716,7 +716,7 @@ const relayServer = http.createServer((req, res) => {
                 return;
             }
 
-            const match = req.url.match(/^\\/internal\\/steam-link\\/([0-9]{17})$/);
+            const match = req.url.match(/^\/internal\/steam-link\/([0-9]{17})$/);
             if (!match) {
                 sendJson(res, 400, { ok: false, error: 'Invalid Discord user ID.' });
                 return;

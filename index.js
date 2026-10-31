@@ -757,7 +757,7 @@ const relayServer = http.createServer((req, res) => {
                 return;
             }
 
-            if (!/^\\d{17,20}$/.test(discordId)) {
+            if (!/^\d{17,20}$/.test(discordId)) {
                 sendJson(res, 400, { ok: false, error: 'Invalid Discord user ID.' });
                 return;
             }

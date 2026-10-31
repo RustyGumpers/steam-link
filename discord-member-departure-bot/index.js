@@ -116,7 +116,7 @@ function fallbackSnapshot(user, guildId) {
 }
 
 async function lookupSteamId(discordId) {
-  if (!STEAM_LOOKUP_URL || !STEAM_LOOKUP_TOKEN) return null;
+  if (!STEAM_LOOKUP_URL || !STEAM_LOOKUP_TOKEN) return "unavailable";
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
   try {
@@ -131,7 +131,7 @@ async function lookupSteamId(discordId) {
     return /^[0-9]{17}$/.test(steamId) ? steamId : null;
   } catch (error) {
     console.error(`SteamID lookup failed for Discord user ${discordId}:`, error.message);
-    return null;
+    return "unavailable";
   } finally {
     clearTimeout(timeout);
   }
@@ -175,12 +175,14 @@ function makeEmbed(record) {
       { name: "Departed", value: timestamp(record.departedAt), inline: true }
     );
 
-  if (record.steamId) {
+  if (/^[0-9]{17}$/.test(String(record.steamId || ""))) {
     embed.addFields({
       name: "Steam Profile",
-      value: `[ ${record.steamId} ](https://steamcommunity.com/profiles/${record.steamId})`,
+      value: `[${record.steamId}](https://steamcommunity.com/profiles/${record.steamId})`,
       inline: false
     });
+  } else if (record.steamId === "unavailable") {
+    embed.addFields({ name: "Steam Information", value: "Steam link lookup unavailable", inline: false });
   } else {
     embed.addFields({ name: "Steam Information", value: "No Steam account linked", inline: false });
   }

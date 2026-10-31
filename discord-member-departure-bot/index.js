@@ -280,7 +280,11 @@ client.once("ready", async () => {
 });
 
 client.on("guildMemberAdd", member => {
-  if (member.guild.id === GUILD_ID) snapshotMember(member);
+  if (member.guild.id !== GUILD_ID) return;
+  const key = `${member.guild.id}:${member.id}`;
+  processedDepartures.delete(key);
+  recentBans.delete(member.id);
+  snapshotMember(member);
 });
 
 client.on("guildMemberUpdate", (_oldMember, newMember) => {

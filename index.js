@@ -699,6 +699,42 @@ const relayServer = http.createServer((req, res) => {
             return;
         }
 
+        if (req.method === 'GET' && req.url.startsWith('/internal/steam-link/')) {
+            const expectedToken = process.env.STEAM_LINK_LOOKUP_TOKEN || '';
+            const suppliedToken = bearerToken(req);
+
+            if (!/^[a-f0-9]{64}$/i.test(expectedToken) ||
+                !/^[a-f0-9]{64}$/i.test(suppliedToken)) {
+                sendJson(res, 401, { ok: false, error: 'Unauthorized.' });
+                return;
+            }
+
+            const expected = Buffer.from(expectedToken, 'hex');
+            const supplied = Buffer.from(suppliedToken, 'hex');
+            if (!crypto.timingSafeEqual(expected, supplied)) {
+                sendJson(res, 401, { ok: false, error: 'Unauthorized.' });
+                return;
+            }
+
+            const match = req.url.match(/^\\/internal\\/steam-link\\/([0-9]{17})$/);
+            if (!match) {
+                sendJson(res, 400, { ok: false, error: 'Invalid Discord user ID.' });
+                return;
+            }
+
+            const link = db.prepare(
+                'SELECT steam_id AS steamId FROM steam_links WHERE discord_id = ?'
+            ).get(match[1]);
+
+            if (!link || !/^[0-9]{17}$/.test(String(link.steamId || ''))) {
+                sendJson(res, 404, { ok: false, error: 'No Steam account linked.' });
+                return;
+            }
+
+            sendJson(res, 200, { ok: true, steamId: String(link.steamId) });
+            return;
+        }
+
         if (req.method === 'GET' && req.url === '/client/all-state') {
             const record = requireClientToken(req, res);
             if (!record) return;

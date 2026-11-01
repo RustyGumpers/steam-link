@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.6
+// @version      11.7
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -24,7 +24,9 @@
 
     const SYNC_API_URL = 'https://steam-link-production.up.railway.app';
     const TOKEN_KEY = 'discordSteamSyncToken';
-    const CUSTOM_PREFIX_KEY = 'discordSteamSyncCustomPrefixV1';
+    const GUMP_CUSTOM_PREFIX_KEY = 'discordSteamSyncGumpPrefixV1';
+    const RECRUIT_CUSTOM_PREFIX_KEY = 'discordSteamSyncRecruitPrefixV1';
+    const LEGACY_CUSTOM_PREFIX_KEY = 'discordSteamSyncCustomPrefixV1';
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV10';
     const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
@@ -65,18 +67,48 @@
         return String(readStoredValue(TOKEN_KEY, '') || '').trim();
     }
 
-    function getCustomPrefix() {
-        return trimNickname(readStoredValue(CUSTOM_PREFIX_KEY, '') || '');
+    function getCustomPrefix(role) {
+        const key = role === 'Gump'
+            ? GUMP_CUSTOM_PREFIX_KEY
+            : role === 'Recruit'
+                ? RECRUIT_CUSTOM_PREFIX_KEY
+                : '';
+        return key ? trimNickname(readStoredValue(key, '') || '') : '';
     }
 
-    function applyCustomPrefix(nickname) {
+    function getEffectivePrefix(role, customPrefix = getCustomPrefix(role)) {
+        return trimNickname(customPrefix || role);
+    }
+
+    function migrateLegacyPrefix() {
+        const legacy = trimNickname(readStoredValue(LEGACY_CUSTOM_PREFIX_KEY, '') || '');
+        if (!legacy) return;
+
+        const gumpCurrent = getCustomPrefix('Gump');
+        const recruitCurrent = getCustomPrefix('Recruit');
+        if (gumpCurrent || recruitCurrent) {
+            removeStoredValue(LEGACY_CUSTOM_PREFIX_KEY);
+            return;
+        }
+
+        // A legacy shared prefix cannot be copied to both roles because role
+        // prefixes must remain distinct. Preserve it on one role only.
+        if (legacy.toLowerCase() === 'recruit') {
+            writeStoredValue(RECRUIT_CUSTOM_PREFIX_KEY, legacy);
+        } else {
+            writeStoredValue(GUMP_CUSTOM_PREFIX_KEY, legacy);
+        }
+        removeStoredValue(LEGACY_CUSTOM_PREFIX_KEY);
+    }
+
+    function applyCustomPrefix(nickname, role) {
         const base = trimNickname(nickname);
-        const prefix = getCustomPrefix();
+        const prefix = getCustomPrefix(role);
         if (!prefix) return base;
 
         // Replace the built-in role prefix when one is present.
         const withoutBuiltInPrefix = base.replace(/^(?:Gump|Recruit)\s+/i, '');
-        return trimNickname(`${prefix} ${withoutBuiltInPrefix}`);
+        return trimNickname(\`\${prefix} \${withoutBuiltInPrefix}\`);
     }
 
     function trimNickname(value) {
@@ -300,11 +332,12 @@
 
         const discordNickname = getStateNickname(state);
         const roleMatch = discordNickname.match(/^(Gump|Recruit)\s+/i);
-        const rolePrefix = roleMatch ? roleMatch[1] : '';
+        const rolePrefix = String(state?.role || (roleMatch ? roleMatch[1] : '')).trim();
+        if (rolePrefix !== 'Gump' && rolePrefix !== 'Recruit') {
+            throw new Error('Discord role information is missing for a linked roster member.');
+        }
 
-        return applyCustomPrefix(
-            rolePrefix ? rolePrefix + ' ' + steamName : steamName
-        );
+        return applyCustomPrefix(rolePrefix + ' ' + steamName, rolePrefix);
     }
 
     async function scanFriends() {
@@ -397,11 +430,15 @@
 
     function stateSignature(states) {
         return states
-            .map(item => ({ steamId: getStateSteamId(item), nickname: getStateNickname(item) }))
+            .map(item => ({
+                steamId: getStateSteamId(item),
+                nickname: getStateNickname(item),
+                role: String(item?.role || '').trim()
+            }))
             .filter(item => item.steamId && item.nickname)
             .sort((a, b) => a.steamId.localeCompare(b.steamId))
-            .map(item => `${item.steamId}|${item.nickname}`)
-            .join('\n');
+            .map(item => \`\${item.steamId}|\${item.role}|\${item.nickname}\`)
+            .join('\\n');
     }
 
     async function syncNicknames(force = false) {
@@ -605,26 +642,37 @@
         }
     }
 
-    function setupCustomPrefix() {
-        const current = getCustomPrefix();
+    function setupCustomPrefix(role) {
+        const otherRole = role === 'Gump' ? 'Recruit' : 'Gump';
+        const key = role === 'Gump' ? GUMP_CUSTOM_PREFIX_KEY : RECRUIT_CUSTOM_PREFIX_KEY;
+        const current = getCustomPrefix(role);
         const value = prompt(
-            'Enter your custom Steam nickname prefix.\n\n' +
-            'Example: Family\n\n' +
-            'Leave blank to use the Discord Gump/Recruit prefix.',
+            'Enter your custom Steam nickname prefix for ' + role + ' members.\n\n' +
+            'Leave blank to use the default "' + role + '" prefix.',
             current
         );
         if (value === null) return;
 
         const prefix = trimNickname(value);
-        writeStoredValue(CUSTOM_PREFIX_KEY, prefix);
+        const otherPrefix = getEffectivePrefix(otherRole);
+        const proposedPrefix = getEffectivePrefix(role, prefix);
 
-        if (prefix) {
-            setStatus(`Custom prefix saved: ${prefix}`, 'Syncing nicknames with your custom prefix…');
-        } else {
-            setStatus('Custom prefix cleared.', 'Restoring the Discord Gump/Recruit prefixes…');
+        if (proposedPrefix.toLowerCase() === otherPrefix.toLowerCase()) {
+            const warning = 'Gump and Recruit prefixes must be different. Please choose two unique prefixes.';
+            setStatus(warning);
+            alert(warning);
+            return;
         }
 
-        syncNicknames(true).catch(error => setStatus(error.message || 'Custom prefix sync failed.'));
+        writeStoredValue(key, prefix);
+
+        if (prefix) {
+            setStatus(role + ' custom prefix saved: ' + prefix, 'Syncing nicknames with the updated role prefix…');
+        } else {
+            setStatus(role + ' custom prefix cleared.', 'Restoring the default "' + role + '" prefix…');
+        }
+
+        syncNicknames(true).catch(error => setStatus(error.message || role + ' prefix sync failed.'));
     }
 
     function setupToken() {
@@ -697,7 +745,8 @@
             <div id="discord-steam-sync-body">
                 <button id="discord-steam-sync-button">🔄 Sync All Nicknames</button>
                 <button id="discord-steam-sync-setup">🔐 Set Sync Token</button>
-                <button id="discord-steam-sync-prefix">🏷️ Set Custom Prefix</button>
+                <button id="discord-steam-sync-gump-prefix">🏷️ Set Gump Prefix</button>
+                <button id="discord-steam-sync-recruit-prefix">🏷️ Set Recruit Prefix</button>
                 <button id="discord-steam-sync-clear-friends">🧹 Remove All Friend Nicknames</button>
                 <button id="discord-steam-sync-stop">🛑 Stop Current Sync</button>
                 <div id="discord-steam-sync-status"></div>
@@ -709,7 +758,8 @@
         panel.querySelector('#discord-steam-sync-close').addEventListener('click', () => panel.remove());
         panel.querySelector('#discord-steam-sync-button').addEventListener('click', () => syncNicknames(true));
         panel.querySelector('#discord-steam-sync-setup').addEventListener('click', setupToken);
-        panel.querySelector('#discord-steam-sync-prefix').addEventListener('click', setupCustomPrefix);
+        panel.querySelector('#discord-steam-sync-gump-prefix').addEventListener('click', () => setupCustomPrefix('Gump'));
+        panel.querySelector('#discord-steam-sync-recruit-prefix').addEventListener('click', () => setupCustomPrefix('Recruit'));
         panel.querySelector('#discord-steam-sync-clear-friends').addEventListener('click', clearAllFriendNicknames);
         panel.querySelector('#discord-steam-sync-stop').addEventListener('click', () => {
             stopRequested = true;
@@ -757,7 +807,8 @@
     function registerMenuCommands() {
         const commands = [
             ['Set Discord Steam Sync Token', setupToken],
-            ['Set Custom Nickname Prefix', setupCustomPrefix],
+            ['Set Gump Nickname Prefix', () => setupCustomPrefix('Gump')],
+            ['Set Recruit Nickname Prefix', () => setupCustomPrefix('Recruit')],
             ['Sync All Nicknames', () => syncNicknames(true)],
             ['Remove All Friend Nicknames', clearAllFriendNicknames]
         ];
@@ -773,6 +824,7 @@
         }
     }
 
+    migrateLegacyPrefix();
     registerMenuCommands();
     startUIObserver();
     startPolling();

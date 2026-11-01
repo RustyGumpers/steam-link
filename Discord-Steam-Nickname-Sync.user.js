@@ -108,7 +108,7 @@
 
         // Replace the built-in role prefix when one is present.
         const withoutBuiltInPrefix = base.replace(/^(?:Gump|Recruit)\s+/i, '');
-        return trimNickname(\`\${prefix} \${withoutBuiltInPrefix}\`);
+        return trimNickname(`${prefix} ${withoutBuiltInPrefix}`);
     }
 
     function trimNickname(value) {
@@ -437,8 +437,8 @@
             }))
             .filter(item => item.steamId && item.nickname)
             .sort((a, b) => a.steamId.localeCompare(b.steamId))
-            .map(item => \`\${item.steamId}|\${item.role}|\${item.nickname}\`)
-            .join('\\n');
+            .map(item => `${item.steamId}|${item.role}|${item.nickname}`)
+            .join('\n');
     }
 
     async function syncNicknames(force = false) {

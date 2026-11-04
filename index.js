@@ -699,6 +699,65 @@ const relayServer = http.createServer((req, res) => {
             return;
         }
 
+        if (req.method === 'GET' && req.url === '/internal/roster') {
+            const expectedToken = process.env.STEAM_LINK_ROSTER_TOKEN || '';
+            const suppliedToken = bearerToken(req);
+
+            if (!/^[a-f0-9]{64}$/i.test(expectedToken) ||
+                !/^[a-f0-9]{64}$/i.test(suppliedToken)) {
+                sendJson(res, 401, { ok: false, error: 'Unauthorized.' });
+                return;
+            }
+
+            const expected = Buffer.from(expectedToken, 'hex');
+            const supplied = Buffer.from(suppliedToken, 'hex');
+            if (!crypto.timingSafeEqual(expected, supplied)) {
+                sendJson(res, 401, { ok: false, error: 'Unauthorized.' });
+                return;
+            }
+
+            const guild = client.guilds.cache.get(config.guildId);
+            if (!guild || !client.isReady()) {
+                sendJson(res, 503, { ok: false, complete: false, error: 'Discord roster is not ready.' });
+                return;
+            }
+
+            const members = guild.members.cache;
+            if (members.size !== guild.memberCount) {
+                sendJson(res, 503, {
+                    ok: false,
+                    complete: false,
+                    memberCount: guild.memberCount,
+                    fetchedMemberCount: members.size,
+                    error: 'Steam-link member roster is incomplete; retry shortly.'
+                });
+                return;
+            }
+
+            const roster = Array.from(members.values())
+                .filter(member => !member.user.bot && hasRosterRole(member))
+                .map(member => ({
+                    id: member.id,
+                    displayName: member.displayName || member.user.globalName || member.user.username,
+                    username: member.user.username,
+                    role: [
+                        member.roles.cache.has(ROLE_GUMP) ? 'Gump' : null,
+                        member.roles.cache.has(ROLE_RECRUIT) ? 'Recruit' : null
+                    ].filter(Boolean).join(' / ')
+                }))
+                .sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, { sensitivity: 'base' }));
+
+            sendJson(res, 200, {
+                ok: true,
+                complete: true,
+                memberCount: guild.memberCount,
+                fetchedMemberCount: members.size,
+                generatedAt: Date.now(),
+                members: roster
+            });
+            return;
+        }
+
         if (req.method === 'GET' && req.url.startsWith('/internal/steam-link/')) {
             const expectedToken = process.env.STEAM_LINK_LOOKUP_TOKEN || '';
             const suppliedToken = bearerToken(req);

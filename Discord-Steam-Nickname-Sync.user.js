@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.9
+// @version      11.10
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -420,65 +420,26 @@
                 data: `nickname=${encodeURIComponent(trimNickname(nickname))}&sessionid=${encodeURIComponent(sessionID)}`,
                 onload: response => {
                     if (response.status < 200 || response.status >= 300) {
-                        console.error(
-                            '[Discord Steam Sync] Steam nickname update HTTP failure:',
-                            { steamId, status: response.status }
-                        );
                         reject(new Error(`Steam nickname update failed for ${steamId} (HTTP ${response.status}).`));
                         return;
                     }
 
-                    const rawResponseText = String(response.responseText || '');
                     let data;
                     try {
-                        data = JSON.parse(rawResponseText || '{}');
+                        data = JSON.parse(String(response.responseText || '{}'));
                     } catch {
-                        const safeRawResponseText = rawResponseText
-                            .replace(/("(?:sessionid|session_id|token|auth|authorization|cookie|password|secret)"\\s*:\\s*")[^"]*"/gi, '$1[REDACTED]"')
-                            .replace(/((?:sessionid|session_id|token|auth|authorization|cookie|password|secret)=)[^&\\s]+/gi, '$1[REDACTED]');
-                        console.error('[Discord Steam Sync] Steam nickname update returned non-JSON data:', {
-                            steamId,
-                            status: response.status,
-                            rawResponseText: safeRawResponseText || '[empty response]'
-                        });
                         reject(new Error(`Steam nickname update returned invalid data for ${steamId}.`));
                         return;
                     }
 
                     if (Number(data?.success) !== 1) {
-                        const redactSensitiveFields = value => {
-                            if (Array.isArray(value)) return value.map(redactSensitiveFields);
-                            if (!value || typeof value !== 'object') return value;
-                            const safe = {};
-                            for (const [key, item] of Object.entries(value)) {
-                                safe[key] = /(session|token|auth|cookie|password|secret|credential)/i.test(key)
-                                    ? '[REDACTED]'
-                                    : redactSensitiveFields(item);
-                            }
-                            return safe;
-                        };
-                        const safeRawResponseText = rawResponseText
-                            .replace(/("(?:sessionid|session_id|token|auth|authorization|cookie|password|secret)"\\s*:\\s*")[^"]*"/gi, '$1[REDACTED]"')
-                            .replace(/((?:sessionid|session_id|token|auth|authorization|cookie|password|secret)=)[^&\\s]+/gi, '$1[REDACTED]');
-                        console.error('[Discord Steam Sync] Steam rejected nickname update:', {
-                            steamId,
-                            status: response.status,
-                            parsedResponseFields: redactSensitiveFields(data),
-                            rawResponseText: safeRawResponseText || '[empty response]'
-                        });
                         reject(new Error(`Steam nickname update failed for ${steamId}.`));
                         return;
                     }
 
                     resolve();
                 },
-                onerror: error => {
-                    console.error(
-                        '[Discord Steam Sync] Steam nickname update network/security error:',
-                        { steamId, error }
-                    );
-                    reject(new Error(`Steam nickname update failed for ${steamId}.`));
-                }
+                onerror: () => reject(new Error(`Steam nickname update failed for ${steamId}.`))
             });
         });
     }
@@ -587,9 +548,8 @@
                         if (result === 'sent') requested++;
                         else if (result === 'pending') alreadyPending++;
                         else if (result === 'throttled') throttled++;
-                    } catch (error) {
+                    } catch {
                         requestFailed++;
-                        console.warn('[Discord Steam Sync] Auto friend request failed:', steamId, error);
                     }
 
                     await sleep(500);
@@ -873,9 +833,7 @@
                 if (typeof GM_registerMenuCommand === 'function') {
                     GM_registerMenuCommand(name, callback);
                 }
-            } catch (error) {
-                console.warn('[Discord Steam Sync] Menu registration failed:', error);
-            }
+            } catch {}
         }
     }
 

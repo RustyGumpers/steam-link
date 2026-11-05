@@ -2195,11 +2195,14 @@ async function sendSteamLinkPrompt(member) {
     );
 
     try {
+        const promptEmbed = new EmbedBuilder()
+            .setAuthor({ name: 'Gump Turret Auth Bot' })
+            .setDescription(
+                '⚠️ This is a friendly reminder from the Gump Turret Auth bot that you have not yet linked your Steam account to your Discord account. Please do so if you want to be authorized on turrets.'
+            );
+
         await currentMember.send({
-            content:
-                '⚠️ **You are not linked to Steam yet.**\n\n' +
-                'Please link your Steam account using the button below.\n\n' +
-                '**This is essential for being authorized on turrets.**',
+            embeds: [promptEmbed],
             components: [row]
         });
 

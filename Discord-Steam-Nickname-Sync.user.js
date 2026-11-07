@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.17
+// @version      11.18
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -550,12 +550,20 @@
                         reject(new Error('Steam nickname verification returned invalid JSON.'));
                         return;
                     }
-                    const nicknames = payload?.response?.nicknames ?? payload?.nicknames;
-                    if (!Array.isArray(nicknames)) {
-                        reject(new Error(payload?.error || 'Steam did not return a readable nickname list. Verification is unavailable.'));
+                    const responseData = payload?.response;
+                    const nicknames = responseData?.nicknames ?? payload?.nicknames;
+                    if (Array.isArray(nicknames)) {
+                        resolve(nicknames);
                         return;
                     }
-                    resolve(nicknames);
+                    // Steam may omit an empty repeated protobuf field entirely.
+                    // An explicit response object with no error therefore means
+                    // an empty nickname list, not a malformed response.
+                    if (responseData && typeof responseData === 'object' && !Array.isArray(responseData) && !payload?.error) {
+                        resolve([]);
+                        return;
+                    }
+                    reject(new Error(payload?.error || 'Steam did not return a readable nickname list. Verification is unavailable.'));
                 },
                 onerror: () => reject(new Error('Could not contact Steam to verify the nickname list.')),
                 ontimeout: () => reject(new Error('Steam nickname verification timed out.'))

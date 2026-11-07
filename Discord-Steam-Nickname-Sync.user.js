@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.45
+// @version      11.46
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -314,10 +314,26 @@
                     catch { finish(reject, new Error('Server returned invalid JSON.')); return; }
 
                     if (response.status < 200 || response.status >= 300) {
-                        if (response.status === 401) {
-                            removeStoredValue(TOKEN_KEY);
-                        }
-                        finish(reject, new Error(data.error || `HTTP ${response.status}`));
+                        const responseBody = String(response.responseText || '')
+                            .replace(/<[^>]*>/g, ' ')
+                            .replace(/\\s+/g, ' ')
+                            .trim()
+                            .slice(0, 800) || '(empty response body)';
+                        const endpoint = String(url).split('?')[0];
+                        // Never log request headers or the bearer sync token.
+                        console.error('[Discord Steam Sync] Relay API request failed.', {
+                            method,
+                            endpoint,
+                            status: response.status,
+                            statusText: String(response.statusText || ''),
+                            responseBody
+                        });
+                        const message = response.status === 401
+                            ? 'The Discord/Railway sync API rejected your sync token (HTTP 401). ' +
+                              'The token has been kept so you do not have to re-enter it yet. ' +
+                              'Relay response: ' + responseBody
+                            : (data.error || `HTTP ${response.status}: ${responseBody}`);
+                        finish(reject, new Error(message));
                         return;
                     }
                     finish(resolve, data);

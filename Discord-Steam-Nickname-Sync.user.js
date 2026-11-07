@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.16
+// @version      11.17
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -697,7 +697,7 @@
 
             const signature = stateSignature(data.states);
             if (data.states.length === 0) {
-                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, `${signature}\\n#coverage:`);
+                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, `${signature}\n#coverage:`);
                 setStatus('No linked Discord accounts need nickname changes.');
                 return;
             }
@@ -1052,7 +1052,12 @@
         });
 
         const hasToken = Boolean(getToken());
-        setStatus(hasToken ? (isFriendsPage() ? 'Ready.' : 'Open Steam → Friends to sync.') : 'Sync token required.');
+        const hasApiKey = Boolean(getSteamApiKey());
+        setStatus(
+            !hasToken ? 'Sync token required.' :
+            !hasApiKey ? 'Steam API key required.' :
+            (isFriendsPage() ? 'Ready.' : 'Open Steam → Friends to sync.')
+        );
 
         if (!hasToken) {
             setTimeout(() => {

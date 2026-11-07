@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.30
+// @version      11.31
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -66,6 +66,7 @@
         try {
             if (typeof GM_setValue === 'function') {
                 GM_setValue(key, value);
+                try { localStorage.removeItem(key); } catch {}
                 return;
             }
         } catch {}
@@ -78,7 +79,10 @@
     }
 
     function getToken() {
-        return String(readStoredValue(TOKEN_KEY, '') || '').trim();
+        const token = String(readStoredValue(TOKEN_KEY, '') || '').trim();
+        // Migrate any legacy localStorage token into private Tampermonkey storage.
+        if (token) writeStoredValue(TOKEN_KEY, token);
+        return token;
     }
 
     function getCustomPrefix(role) {
@@ -161,8 +165,8 @@
 
     function trimNickname(value) {
         const normalized = String(value || '')
-            .replace(/[\\r\\n]+/g, ' ')
-            .replace(/\\s+/g, ' ')
+            .replace(/[\r\n]+/g, ' ')
+            .replace(/\s+/g, ' ')
             .trim();
         // Count Unicode code points so a 32-character limit never splits an emoji.
         return Array.from(normalized).slice(0, MAX_NICKNAME_LENGTH).join('');

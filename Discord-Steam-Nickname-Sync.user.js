@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.28
+// @version      11.29
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -34,8 +34,6 @@
     const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-    const AUTO_SCAN_RETRIES = 8;
-    const AUTO_SCAN_RETRY_DELAY_MS = 5000;
     const POLL_INTERVAL_MS = 15000;
     const FRIEND_COVERAGE_RECHECK_MS = 60000;
     const REQUEST_TIMEOUT_MS = 15000;
@@ -248,7 +246,9 @@
     }
 
     function getStateSteamId(state) {
-        const candidates = [state?.steamId, state?.steamID, state?.steam_id, state?.id];
+        // The relay always supplies steamId. Do not fall back to a generic `id`,
+        // which could be a Discord snowflake and accidentally target the wrong account.
+        const candidates = [state?.steamId, state?.steamID, state?.steam_id];
         for (const value of candidates) {
             const id = String(value || '').trim();
             if (/^\d{17}$/.test(id)) return id;
@@ -625,8 +625,13 @@
     function hasManagedRolePrefix(nickname) {
         const value = trimNickname(nickname).toLowerCase();
         return ['Gump', 'Recruit'].some(role => {
-            const prefix = getEffectivePrefix(role).toLowerCase();
-            return prefix && value.startsWith(prefix + ' ');
+            // Recognize both the built-in role label and the currently
+            // configured custom prefix when deciding whether a clear is safe.
+            const prefixes = [role, getEffectivePrefix(role)];
+            return prefixes.some(prefix => {
+                const normalized = trimNickname(prefix).toLowerCase();
+                return normalized && value.startsWith(normalized + ' ');
+            });
         });
     }
 

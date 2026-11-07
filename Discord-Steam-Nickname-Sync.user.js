@@ -506,18 +506,22 @@
                 stateBySteamId.set(steamId, state);
             }
 
-            // Only active roster members should receive nickname syncs or
-            // automatic Steam friend requests. The relay also contains "clear"
-            // states for linked users who lost their Recruit/Gump role, left
-            // Discord, or were otherwise queued for nickname cleanup.
+            // Keep active roster members and clear states separate. Clear
+            // states are authoritative: they represent linked users who lost
+            // Recruit/Gump, left Discord, or otherwise need their old local
+            // nickname removed. They must NOT be filtered out before the
+            // reconciliation step.
             const desired = new Map();
+            const clearStates = new Map();
             for (const [steamId, state] of stateBySteamId.entries()) {
                 if (steamId === currentSteamId) continue;
 
                 const role = String(state?.role || '').trim();
-                if (role !== 'Gump' && role !== 'Recruit') continue;
-
-                desired.set(steamId, state);
+                if (role === 'Gump' || role === 'Recruit') {
+                    desired.set(steamId, state);
+                } else {
+                    clearStates.set(steamId, state);
+                }
             }
 
             const matching = [...desired.keys()]
@@ -562,18 +566,20 @@
             }
 
             const entries = [...desired.entries()].filter(([steamId]) => steamId !== currentSteamId && friends.has(steamId));
+            const clearEntries = [...clearStates.entries()].filter(([steamId]) => steamId !== currentSteamId && friends.has(steamId));
             let completed = 0;
+            const totalEntries = entries.length + clearEntries.length;
 
-            if (entries.length === 0) {
+            if (totalEntries === 0) {
                 throw new Error(
-                    `No matching Steam friends to update. Steam found ${friends.size} friend(s), but none of the ${desired.size} Discord-linked Steam IDs matched.`
+                    `No matching Steam friends to update. Steam found ${friends.size} friend(s), but none of the ${desired.size + clearStates.size} Discord-linked Steam IDs matched.`
                 );
             }
 
             for (const [steamId, state] of entries) {
                 if (stopRequested) throw new Error('Sync stopped.');
                 completed++;
-                setStatus('Syncing nicknames…', `Processing ${completed} / ${entries.length}`);
+                setStatus('Syncing nicknames…', `Processing ${completed} / ${totalEntries}`);
 
                 // Build the actual nickname from the Discord role and the
                 // current Steam display name. Do not pass the whole state
@@ -583,8 +589,25 @@
                 await sleep(500);
             }
 
+            // Explicitly reconcile users who no longer have Recruit/Gump.
+            // Restore their current Steam display name without any custom role
+            // prefix. This is the path that was previously being discarded.
+            for (const [steamId] of clearEntries) {
+                if (stopRequested) throw new Error('Sync stopped.');
+                completed++;
+                setStatus('Clearing old role prefixes…', `Processing ${completed} / ${totalEntries}`);
+
+                const steamName = getSteamDisplayName(friends.get(steamId));
+                if (!steamName) {
+                    throw new Error('Could not read a Steam display name for one of the friends being cleared.');
+                }
+
+                await setSteamNickname(steamId, steamName);
+                await sleep(500);
+            }
+
             writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature);
-            setStatus(`Sync complete — ${entries.length} nickname(s) updated.`);
+            setStatus(`Sync complete — ${totalEntries} nickname(s) reconciled.`);
             await sleep(2500);
             location.reload();
         } catch (error) {

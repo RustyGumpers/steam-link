@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.23
+// @version      11.24
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -945,7 +945,7 @@
             setStatus('Set your Steam Web API key before removing nicknames so each removal can be verified.');
             return;
         }
-        if (!confirm('Remove all local nicknames from your Steam friends? This is an explicit manual action.')) return;
+        if (!confirm('Remove local nicknames from the friends currently loaded in Steam’s Friends list? This only covers entries Steam has rendered on this page; hidden, paginated, or not-yet-loaded friends may not be included. This is an explicit manual action.')) return;
 
         syncRunning = true;
         stopRequested = false;

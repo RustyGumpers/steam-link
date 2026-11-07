@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.14
+// @version      11.15
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -10,12 +10,14 @@
 // @downloadURL  https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @match        https://steamcommunity.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_cookie
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      steam-link-production.up.railway.app
 // @connect      steamcommunity.com
+// @connect      api.steampowered.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -36,6 +38,8 @@
     const POLL_INTERVAL_MS = 15000;
     const FRIEND_COVERAGE_RECHECK_MS = 60000;
     const REQUEST_TIMEOUT_MS = 15000;
+    const NICKNAME_VERIFY_ATTEMPTS = 3;
+    const NICKNAME_VERIFY_DELAY_MS = 1500;
     const MAX_NICKNAME_LENGTH = 32;
 
     let stopRequested = false;
@@ -480,17 +484,134 @@
         });
     }
 
+    async function getSteamAccessToken() {
+        // Steam's authenticated web cookie contains "SteamID||access_token".
+        // It is HttpOnly, so use Tampermonkey's cookie API rather than scraping
+        // page HTML or relying on document.cookie.
+        const readCookie = () => new Promise((resolve, reject) => {
+            try {
+                if (!globalThis.GM_cookie?.list) {
+                    reject(new Error('Tampermonkey cookie access is unavailable. Update Tampermonkey and reload Steam.'));
+                    return;
+                }
+                GM_cookie.list(
+                    { url: 'https://steamcommunity.com/', name: 'steamLoginSecure' },
+                    cookies => {
+                        const cookie = Array.isArray(cookies)
+                            ? cookies.find(item => item?.name === 'steamLoginSecure')
+                            : null;
+                        if (!cookie?.value) {
+                            reject(new Error('Steam login token was not available. Sign in to Steam and reload the Friends page.'));
+                            return;
+                        }
+                        resolve(String(cookie.value));
+                    }
+                );
+            } catch (error) {
+                reject(new Error(error?.message || 'Could not read the Steam login token.'));
+            }
+        });
+
+        const rawCookie = await readCookie();
+        let value = rawCookie;
+        try { value = decodeURIComponent(value); } catch {}
+        const separator = value.indexOf('||');
+        if (separator < 0) {
+            throw new Error('Steam login cookie did not contain an access token. Sign in again and retry.');
+        }
+        const token = value.slice(separator + 2).trim();
+        if (!token || token.split('.').length < 2) {
+            throw new Error('Steam access token was missing or invalid. Sign in again and retry.');
+        }
+        return token;
+    }
+
+    function getAccountIdFromSteamId(steamId) {
+        try {
+            return (BigInt(steamId) - 76561197960265728n).toString();
+        } catch {
+            return '';
+        }
+    }
+
+    async function getSteamNicknameList() {
+        const accessToken = await getSteamAccessToken();
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://api.steampowered.com/IPlayerService/GetNicknameList/v1/?access_token=${encodeURIComponent(accessToken)}`,
+                timeout: REQUEST_TIMEOUT_MS,
+                headers: { Accept: 'application/json' },
+                onload: response => {
+                    if (response.status < 200 || response.status >= 300) {
+                        reject(new Error(`Steam nickname verification request failed (HTTP ${response.status}).`));
+                        return;
+                    }
+                    let payload;
+                    try {
+                        payload = JSON.parse(String(response.responseText || '{}'));
+                    } catch {
+                        reject(new Error('Steam nickname verification returned invalid JSON.'));
+                        return;
+                    }
+                    const nicknames = payload?.response?.nicknames ?? payload?.nicknames;
+                    if (!Array.isArray(nicknames)) {
+                        reject(new Error(payload?.error || 'Steam did not return a readable nickname list. Verification is unavailable.'));
+                        return;
+                    }
+                    resolve(nicknames);
+                },
+                onerror: () => reject(new Error('Could not contact Steam to verify the nickname list.')),
+                ontimeout: () => reject(new Error('Steam nickname verification timed out.'))
+            });
+        });
+    }
+
+    async function verifySteamNickname(steamId, expectedNickname) {
+        const expected = trimNickname(expectedNickname);
+        const accountId = getAccountIdFromSteamId(steamId);
+        if (!accountId) throw new Error(`Could not convert SteamID ${steamId} for nickname verification.`);
+
+        let lastError = null;
+        for (let attempt = 1; attempt <= NICKNAME_VERIFY_ATTEMPTS; attempt++) {
+            if (stopRequested) throw new Error('Sync stopped.');
+            try {
+                const nicknames = await getSteamNicknameList();
+                const entry = nicknames.find(item =>
+                    String(item?.accountid ?? item?.account_id ?? '') === accountId ||
+                    String(item?.steamid ?? '') === steamId
+                );
+                const actual = trimNickname(entry?.nickname || '');
+                const matches = expected
+                    ? Boolean(entry) && actual === expected
+                    : !entry || actual === '';
+
+                if (matches) return;
+                lastError = new Error(
+                    expected
+                        ? `Steam did not save the expected nickname for ${steamId}. Expected "${expected}", but Steam returned "${actual || '(no nickname)'}".`
+                        : `Steam did not confirm removal of the local nickname for ${steamId}.`
+                );
+            } catch (error) {
+                lastError = error;
+            }
+            if (attempt < NICKNAME_VERIFY_ATTEMPTS) await sleep(NICKNAME_VERIFY_DELAY_MS);
+        }
+        throw lastError || new Error(`Could not verify the nickname update for ${steamId}.`);
+    }
+
     async function setSteamNickname(steamId, nickname) {
         const sessionID = getSessionId();
         if (!sessionID) throw new Error('Steam session ID was not found.');
+        const expectedNickname = trimNickname(nickname);
 
-        return new Promise((resolve, reject) => {
+        await new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: `https://steamcommunity.com/profiles/${steamId}/ajaxsetnickname/`,
                 timeout: REQUEST_TIMEOUT_MS,
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-                data: `nickname=${encodeURIComponent(trimNickname(nickname))}&sessionid=${encodeURIComponent(sessionID)}`,
+                data: `nickname=${encodeURIComponent(expectedNickname)}&sessionid=${encodeURIComponent(sessionID)}`,
                 onload: response => {
                     if (response.status < 200 || response.status >= 300) {
                         reject(new Error(`Steam nickname update failed for ${steamId} (HTTP ${response.status}).`));
@@ -509,13 +630,17 @@
                         reject(new Error(`Steam nickname update failed for ${steamId}.`));
                         return;
                     }
-
                     resolve();
                 },
                 onerror: () => reject(new Error(`Steam nickname update failed for ${steamId}.`)),
                 ontimeout: () => reject(new Error(`Steam nickname update timed out for ${steamId}.`))
             });
         });
+
+        // A successful ajaxsetnickname response is not proof that Steam
+        // persisted the nickname. Re-fetch Steam's server-side nickname list
+        // and compare the exact value (or confirm that the entry was removed).
+        await verifySteamNickname(steamId, expectedNickname);
     }
 
     function friendCoverageSignature(states, friends) {

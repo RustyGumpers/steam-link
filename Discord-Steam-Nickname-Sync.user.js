@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.18
+// @version      11.19
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -385,11 +385,11 @@
             previousSignature = scanSignature;
 
             // Steam can populate the Friends page incrementally. Require two
-            // consecutive scans with the same non-zero count before treating
-            // the DOM as ready, while still keeping the largest scan seen.
+            // consecutive scans with the same SteamID set before treating
+            // the current DOM snapshot as ready.
             if (bestFriends.size > 0 && stableScans >= 1) {
                 lastFriendCoverageCheckAt = Date.now();
-                return bestFriends;
+                return friends;
             }
 
             setStatus(
@@ -500,7 +500,7 @@
         const current = getSteamApiKey();
         const key = prompt(
             'Enter your Steam Web API key. You can create or view it at https://steamcommunity.com/dev/apikey\n\n' +
-            'The key stays in this browser and is used only to verify saved local nicknames.',
+            'Use a key belonging to the Steam account currently signed in. It stays in Tampermonkey storage and is used only to verify saved local nicknames.',
             current
         );
         if (key === null) return;

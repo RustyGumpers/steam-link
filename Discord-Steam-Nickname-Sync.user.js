@@ -375,7 +375,7 @@
             throw new Error('Steam did not return a complete, readable friends list. Check your Steam privacy settings and API key. No nickname changes were made.');
         }
 
-        const ids = [...new Set(friendRows.map(row => String(row?.steamid || '').trim()).filter(id => /^\\d{17}$/.test(id)))];
+        const ids = [...new Set(friendRows.map(row => String(row?.steamid || '').trim()).filter(id => /^\d{17}$/.test(id)))];
         if (ids.length !== friendRows.length) {
             throw new Error('Steam returned a friends list containing missing or invalid SteamIDs. No nickname changes were made.');
         }
@@ -397,7 +397,7 @@
             for (const player of players) {
                 const id = String(player?.steamid || '').trim();
                 const personaName = trimNickname(player?.personaname || '');
-                if (/^\\d{17}$/.test(id) && personaName) friends.set(id, { personaName });
+                if (/^\d{17}$/.test(id) && personaName) friends.set(id, { personaName });
             }
             await sleep(150);
         }

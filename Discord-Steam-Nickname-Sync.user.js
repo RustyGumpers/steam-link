@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.35
+// @version      11.36
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -591,23 +591,23 @@
     function setupSteamApiKey() {
         const current = getSteamApiKey();
         const instructions =
-            'STEAM NICKNAME VERIFICATION — API KEY SETUP\\n\\n' +
-            'WHY THIS IS NEEDED\\n' +
-            'Steam can report a nickname update as successful even when it was not saved. This key lets the script retrieve your complete Steam friends list and saved local nickname list so it can verify who should be updated and whether changes were saved.\\n\\n' +
-            'HOW TO GET YOUR KEY\\n' +
-            '1. Open https://steamcommunity.com/dev/apikey in a new tab.\\n' +
-            '2. Sign in to the same Steam account you use with this script.\\n' +
-            '3. If Steam asks you to register, complete its registration.\\n' +
-            '4. Copy the 32-character Web API Key shown by Steam.\\n' +
-            '5. Return here, paste the key below, and select OK.\\n\\n' +
-            'PRIVACY — PLEASE READ\\n' +
-            '• The key is saved only in this browser’s Tampermonkey storage.\\n' +
-            '• The script sends the key directly to Steam’s official Web API to retrieve your friends list, profile display names, and saved local nickname list.\\n' +
-            '• The key is NOT sent to our Discord bot, Railway server, or GitHub.\\n' +
-            '• We do not ask for your Steam password, Steam session cookie, or Discord credentials.\\n' +
-            '• The key is not needed by the bot and is not shared with other users.\\n\\n' +
+            'STEAM NICKNAME VERIFICATION — API KEY SETUP\n\n' +
+            'WHY THIS IS NEEDED\n' +
+            'Steam can report a nickname update as successful even when it was not saved. This key lets the script retrieve your complete Steam friends list and saved local nickname list so it can verify who should be updated and whether changes were saved.\n\n' +
+            'HOW TO GET YOUR KEY\n' +
+            '1. Open https://steamcommunity.com/dev/apikey in a new tab.\n' +
+            '2. Sign in to the same Steam account you use with this script.\n' +
+            '3. If Steam asks you to register, complete its registration.\n' +
+            '4. Copy the 32-character Web API Key shown by Steam.\n' +
+            '5. Return here, paste the key below, and select OK.\n\n' +
+            'PRIVACY — PLEASE READ\n' +
+            '• The key is saved only in this browser’s Tampermonkey storage.\n' +
+            '• The script sends the key directly to Steam’s official Web API to retrieve your friends list, profile display names, and saved local nickname list.\n' +
+            '• The key is NOT sent to our Discord bot, Railway server, or GitHub.\n' +
+            '• We do not ask for your Steam password, Steam session cookie, or Discord credentials.\n' +
+            '• The key is not needed by the bot and is not shared with other users.\n\n' +
             'You can remove the saved key at any time with “Remove Steam API Key” in the script. ' +
-            'You need to set it up once for each browser/Tampermonkey installation.\\n\\n' +
+            'You need to set it up once for each browser/Tampermonkey installation.\n\n' +
             'Paste your Steam Web API key below:';
         const key = prompt(instructions, current);
         if (key === null) return;

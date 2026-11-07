@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.19
+// @version      11.20
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -14,6 +14,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @connect      steam-link-production.up.railway.app
 // @connect      steamcommunity.com
 // @connect      api.steampowered.com
@@ -498,27 +499,60 @@
 
     function setupSteamApiKey() {
         const current = getSteamApiKey();
-        const key = prompt(
-            'Enter your Steam Web API key. You can create or view it at https://steamcommunity.com/dev/apikey\n\n' +
-            'Use a key belonging to the Steam account currently signed in. It stays in Tampermonkey storage and is used only to verify saved local nicknames.',
-            current
-        );
+        const instructions =
+            'STEAM NICKNAME VERIFICATION — API KEY SETUP\\n\\n' +
+            'WHY THIS IS NEEDED\\n' +
+            'Steam can report a nickname update as successful even when it was not saved. This key lets the script ask Steam for your saved local nickname list so it can verify changes.\\n\\n' +
+            'HOW TO GET YOUR KEY\\n' +
+            '1. Open https://steamcommunity.com/dev/apikey in a new tab.\\n' +
+            '2. Sign in to the same Steam account you use with this script.\\n' +
+            '3. If Steam asks you to register, complete its registration.\\n' +
+            '4. Copy the 32-character Web API Key shown by Steam.\\n' +
+            '5. Return here, paste the key below, and select OK.\\n\\n' +
+            'PRIVACY — PLEASE READ\\n' +
+            '• The key is saved only in this browser’s Tampermonkey storage.\\n' +
+            '• The script sends the key directly to Steam’s official Web API only to retrieve your nickname list.\\n' +
+            '• The key is NOT sent to our Discord bot, Railway server, or GitHub.\\n' +
+            '• We do not ask for your Steam password, Steam session cookie, or Discord credentials.\\n' +
+            '• The key is not needed by the bot and is not shared with other users.\\n\\n' +
+            'You can remove the saved key at any time with “Remove Steam API Key” in the script. ' +
+            'You need to set it up once for each browser/Tampermonkey installation.\\n\\n' +
+            'Paste your Steam Web API key below:';
+        const key = prompt(instructions, current);
         if (key === null) return;
         const value = key.trim();
+        if (!value) {
+            setStatus('No API key entered. Your existing key was not changed.');
+            return;
+        }
         if (!STEAM_API_KEY_PATTERN.test(value)) {
-            setStatus('Invalid Steam Web API key. It should be 32 hexadecimal characters.');
-            alert('That does not look like a valid Steam Web API key.');
+            setStatus('Invalid Steam Web API key. It should be 32 hexadecimal characters. Your saved key was not changed.');
+            alert('That does not look like a valid Steam Web API key. Your saved key was not changed.');
             return;
         }
         try { GM_setValue(STEAM_API_KEY_STORAGE, value); }
         catch {
-            setStatus('Could not securely save the Steam Web API key in Tampermonkey storage.');
+            setStatus('Could not save the Steam Web API key in Tampermonkey storage.');
             return;
         }
-        setStatus('Steam Web API key saved. Testing nickname-list access…');
+        setStatus('Steam Web API key saved locally. Testing direct access to Steam…');
         getSteamNicknameList()
-            .then(() => setStatus('Steam nickname verification is ready.'))
+            .then(() => setStatus('Steam nickname verification is ready. Your key remains stored locally.'))
             .catch(error => setStatus(error.message || 'Steam nickname verification test failed.'));
+    }
+
+    function removeSteamApiKey() {
+        if (!getSteamApiKey()) {
+            setStatus('No Steam API key is currently saved.');
+            return;
+        }
+        if (!confirm('Remove the Steam Web API key saved in this Tampermonkey installation? Nickname syncing will be unavailable until you add a key again.')) return;
+        try {
+            GM_deleteValue(STEAM_API_KEY_STORAGE);
+            setStatus('Steam Web API key removed from this Tampermonkey installation.');
+        } catch {
+            setStatus('Could not remove the Steam Web API key from Tampermonkey storage.');
+        }
     }
 
     function getAccountIdFromSteamId(steamId) {
@@ -1034,6 +1068,7 @@
                 <button id="discord-steam-sync-button">🔄 Sync All Nicknames</button>
                 <button id="discord-steam-sync-setup">🔐 Set Sync Token</button>
                 <button id="discord-steam-sync-api-key">🔑 Set Steam API Key</button>
+                <button id="discord-steam-sync-remove-api-key">🗑️ Remove Steam API Key</button>
                 <button id="discord-steam-sync-gump-prefix">🏷️ Set Gump Prefix</button>
                 <button id="discord-steam-sync-recruit-prefix">🏷️ Set Recruit Prefix</button>
                 <button id="discord-steam-sync-clear-friends">🧹 Remove All Friend Nicknames</button>
@@ -1051,6 +1086,7 @@
         panel.querySelector('#discord-steam-sync-button').addEventListener('click', () => syncNicknames(true));
         panel.querySelector('#discord-steam-sync-setup').addEventListener('click', setupToken);
         panel.querySelector('#discord-steam-sync-api-key').addEventListener('click', setupSteamApiKey);
+        panel.querySelector('#discord-steam-sync-remove-api-key').addEventListener('click', removeSteamApiKey);
         panel.querySelector('#discord-steam-sync-gump-prefix').addEventListener('click', () => setupCustomPrefix('Gump'));
         panel.querySelector('#discord-steam-sync-recruit-prefix').addEventListener('click', () => setupCustomPrefix('Recruit'));
         panel.querySelector('#discord-steam-sync-clear-friends').addEventListener('click', clearAllFriendNicknames);

@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.44
+// @version      11.45
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -427,12 +427,35 @@
         });
 
         if (response.status === 401) {
+            const responseBody = String(response.responseText || '')
+                .replace(/<[^>]*>/g, ' ')
+                .replace(/\\s+/g, ' ')
+                .trim()
+                .slice(0, 800) || '(empty response body)';
+            const endpoint = String(url).split('?')[0].split('/').slice(-3).join('/');
+            let requestedSteamId = '';
+            try {
+                requestedSteamId = new URL(url).searchParams.get('steamid') || '';
+            } catch {
+                requestedSteamId = '';
+            }
+
+            // Never log the full request URL: it contains the user's Steam Web API key.
+            console.error('[Discord Steam Sync] Steam API returned HTTP 401.', {
+                label,
+                endpoint,
+                steamId: requestedSteamId || '(not present in request)',
+                statusText: String(response.statusText || ''),
+                responseBody
+            });
+
             const privacyHint = label.includes('friends list')
-                ? ' If your API key is valid, open your Steam Profile → Edit Profile → Privacy Settings and set “Friends List” to Public.'
-                : ' Check that your Steam Web API key is valid and that your profile privacy settings allow the requested information.';
+                ? ' Your Friends List is already public, so we should not assume privacy is the cause.'
+                : '';
             throw new Error(
-                'Steam denied API access (HTTP 401) while retrieving ' + label + '. Check your API key and privacy settings.' +
-                privacyHint + ' No nickname changes were made.'
+                'Steam returned HTTP 401 while retrieving ' + label + '.' + privacyHint +
+                ' Steam response: ' + responseBody +
+                ' Check the browser Console for the diagnostic details. No nickname changes were made.'
             );
         }
         if (response.status < 200 || response.status >= 300) {

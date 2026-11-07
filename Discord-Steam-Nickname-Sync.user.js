@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.26
+// @version      11.27
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -33,7 +33,6 @@
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV10';
     const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
-    const SYNC_REPORT_KEY = 'discordSteamSyncLastReportV1';
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
     const AUTO_SCAN_RETRIES = 8;
     const AUTO_SCAN_RETRY_DELAY_MS = 5000;
@@ -181,93 +180,6 @@
         const progressEl = document.querySelector('#discord-steam-sync-progress');
         if (status) status.textContent = message;
         if (progressEl) progressEl.textContent = progress;
-    }
-
-    function renderSyncReport(report) {
-        const panel = document.querySelector('#discord-steam-sync-panel');
-        if (!panel || !report || !Array.isArray(report.sections)) return;
-        let container = panel.querySelector('#discord-steam-sync-report');
-        if (!container) {
-            container = document.createElement('div');
-            container.id = 'discord-steam-sync-report';
-            panel.querySelector('#discord-steam-sync-body')?.appendChild(container);
-        }
-        if (!container) return;
-        container.replaceChildren();
-        const heading = document.createElement('div');
-        heading.className = 'sync-report-heading';
-        heading.textContent = report.title || 'Sync Results';
-        container.appendChild(heading);
-        for (const section of report.sections) {
-            const sectionEl = document.createElement('section');
-            sectionEl.className = 'sync-report-section';
-            const title = document.createElement('div');
-            title.className = 'sync-report-section-title';
-            title.textContent = section.title;
-            sectionEl.appendChild(title);
-            for (const line of (section.lines || [])) {
-                const row = document.createElement('div');
-                row.className = 'sync-report-row';
-                const label = document.createElement('span');
-                label.textContent = line.label;
-                const value = document.createElement('strong');
-                value.textContent = String(line.count ?? 0);
-                if (line.status) value.className = 'sync-report-' + line.status;
-                row.append(label, value);
-                sectionEl.appendChild(row);
-                if (Array.isArray(line.ids) && line.ids.length) {
-                    const idList = document.createElement('div');
-                    idList.className = 'sync-report-ids';
-                    for (const id of line.ids) {
-                        if (!/^\d{17}$/.test(String(id))) continue;
-                        const link = document.createElement('a');
-                        link.href = 'https://steamcommunity.com/profiles/' + id;
-                        link.target = '_blank';
-                        link.rel = 'noopener noreferrer';
-                        link.textContent = id;
-                        idList.appendChild(link);
-                    }
-                    sectionEl.appendChild(idList);
-                }
-            }
-            container.appendChild(sectionEl);
-        }
-        if (report.totals) {
-            const totals = document.createElement('section');
-            totals.className = 'sync-report-section sync-report-totals';
-            const title = document.createElement('div');
-            title.className = 'sync-report-section-title';
-            title.textContent = 'Final totals';
-            totals.appendChild(title);
-            for (const [labelText, count] of Object.entries(report.totals)) {
-                const row = document.createElement('div');
-                row.className = 'sync-report-row';
-                const label = document.createElement('span');
-                label.textContent = labelText;
-                const value = document.createElement('strong');
-                value.textContent = String(count);
-                row.append(label, value);
-                totals.appendChild(row);
-            }
-            container.appendChild(totals);
-        }
-        if (report.warning) {
-            const warning = document.createElement('div');
-            warning.className = 'sync-report-warning';
-            warning.textContent = report.warning;
-            container.appendChild(warning);
-        }
-    }
-    function saveAndRenderSyncReport(report) {
-        report.timestamp = Date.now();
-        writeStoredValue(SYNC_REPORT_KEY, JSON.stringify(report));
-        renderSyncReport(report);
-    }
-    function restoreSyncReport() {
-        try {
-            const report = JSON.parse(readStoredValue(SYNC_REPORT_KEY, '') || 'null');
-            if (report && Date.now() - Number(report.timestamp || 0) < 86400000) renderSyncReport(report);
-        } catch {}
     }
 
     function setButtonDisabled(disabled) {
@@ -870,52 +782,31 @@
         stopRequested = false;
         setButtonDisabled(true);
 
-        const roles = {
-            Gump: { detected: 0, prefixed: 0, failed: [], missing: [] },
-            Recruit: { detected: 0, prefixed: 0, failed: [], missing: [] }
-        };
-        const cleared = { detected: 0, removed: 0, failed: [], missing: [] };
-        const requests = {
-            Gump: { sent: [], pending: [], cooldown: [], failed: [] },
-            Recruit: { sent: [], pending: [], cooldown: [], failed: [] }
-        };
-
+        let verifiedPrefixes = 0, verifiedRemovals = 0, failed = 0;
+        let notFriends = 0, requestsSent = 0, requestPending = 0, requestFailed = 0;
         try {
             setStatus('Loading Discord sync data…');
             const data = await apiRequest('GET', SYNC_API_URL + '/client/all-state');
-            if (!getSteamApiKey()) throw new Error('Before syncing, select “Set Steam API Key” and add your key from https://steamcommunity.com/dev/apikey. Steam requires an API key to retrieve the saved nickname list for verification.');
+            if (!getSteamApiKey()) throw new Error('Before syncing, select “Set Steam API Key” and add your key from https://steamcommunity.com/dev/apikey. Steam requires an API key to retrieve the saved local nickname list for verification.');
             const currentSteamId = getSteamId();
             if (!currentSteamId || data.steamId !== currentSteamId) throw new Error('This sync token is not for the Steam account currently signed in.');
             if (data.ok !== true || data.complete !== true || !Array.isArray(data.states)) throw new Error('Sync data is incomplete. No nicknames were changed.');
             if (Number(data.memberCount || 0) > 0 && Number(data.fetchedMemberCount || data.memberCount) < Number(data.memberCount)) throw new Error('Discord member data is incomplete. No nicknames were changed.');
-
             const signature = stateSignature(data.states);
             const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
             const needsCheck = force || signature !== previous.split('\n#coverage:')[0] || Date.now() - lastFriendCoverageCheckAt >= FRIEND_COVERAGE_RECHECK_MS;
             if (!needsCheck) { setStatus('Already synchronized.'); return; }
-
             const friends = await scanFriends();
-            lastFriendCoverageCheckAt = Date.now();
             const coverage = friendCoverageSignature(data.states, friends);
             const stateById = new Map();
-            for (const state of data.states) {
-                const id = getStateSteamId(state);
-                if (id && getStateNickname(state)) stateById.set(id, state);
-            }
-
+            for (const state of data.states) { const id = getStateSteamId(state); if (id && getStateNickname(state)) stateById.set(id, state); }
             const desired = new Map(), clearStates = new Map();
             for (const [id, state] of stateById) {
                 if (id === currentSteamId) continue;
                 const role = String(state.role || '').trim();
-                if (role === 'Gump' || role === 'Recruit') {
-                    desired.set(id, state);
-                    roles[role].detected++;
-                } else {
-                    clearStates.set(id, state);
-                    cleared.detected++;
-                }
+                if (role === 'Gump' || role === 'Recruit') desired.set(id, state);
+                else clearStates.set(id, state);
             }
-
             const expected = [
                 ...[...desired.entries()].filter(([id]) => friends.has(id)).map(([id, state]) => id + ':' + buildSteamNickname(state, friends.get(id))),
                 ...[...clearStates.keys()].filter(id => friends.has(id)).map(id => {
@@ -926,191 +817,66 @@
             ].sort().join('|');
             const completionSignature = signature + '\n#coverage:' + coverage + '\n#nicknames:' + expected;
             if (!force && completionSignature === previous) { setStatus('Already synchronized.'); return; }
-
-            for (const [id, state] of desired) if (!friends.has(id)) roles[state.role].missing.push(id);
-            for (const id of clearStates.keys()) if (!friends.has(id)) cleared.missing.push(id);
-
+            const missingIds = [...desired.keys(), ...clearStates.keys()].filter(id => !friends.has(id));
+            notFriends = missingIds.length;
             for (const [id, state] of desired) {
                 if (friends.has(id)) continue;
                 if (stopRequested) throw new Error('Sync stopped.');
-                try {
-                    const result = await sendSteamFriendRequest(id);
-                    if (result === 'sent') requests[state.role].sent.push(id);
-                    else if (result === 'pending') requests[state.role].pending.push(id);
-                    else if (result === 'throttled') requests[state.role].cooldown.push(id);
-                } catch { requests[state.role].failed.push(id); }
+                try { const result = await sendSteamFriendRequest(id); if (result === 'sent') requestsSent++; else if (result === 'pending') requestPending++; }
+                catch { requestFailed++; }
                 await sleep(500);
             }
-
             const entries = [...desired.entries()].filter(([id]) => friends.has(id));
             const clearEntries = [...clearStates.entries()].filter(([id]) => friends.has(id));
             let processed = 0;
             const total = entries.length + clearEntries.length;
             for (const [id, state] of entries) {
                 if (stopRequested) throw new Error('Sync stopped.');
-                processed++;
-                setStatus('Syncing role nicknames…', 'Processing ' + processed + ' / ' + total);
-                try {
-                    await setSteamNickname(id, buildSteamNickname(state, friends.get(id)));
-                    roles[state.role].prefixed++;
-                } catch { roles[state.role].failed.push(id); }
+                processed++; setStatus('Applying Discord role prefixes…', 'Processing ' + processed + ' / ' + total);
+                try { await setSteamNickname(id, buildSteamNickname(state, friends.get(id))); verifiedPrefixes++; }
+                catch { failed++; }
                 await sleep(500);
             }
             for (const [id] of clearEntries) {
                 if (stopRequested) throw new Error('Sync stopped.');
-                processed++;
-                setStatus('Removing old role prefixes…', 'Processing ' + processed + ' / ' + total);
-                try {
-                    const name = getSteamDisplayName(friends.get(id));
-                    if (!name) throw new Error('Could not read a Steam display name.');
-                    await setSteamNickname(id, name);
-                    cleared.removed++;
-                } catch { cleared.failed.push(id); }
+                processed++; setStatus('Removing obsolete role prefixes…', 'Processing ' + processed + ' / ' + total);
+                try { const name = getSteamDisplayName(friends.get(id)); if (!name) throw new Error('Could not read a Steam display name.'); await setSteamNickname(id, name); verifiedRemovals++; }
+                catch { failed++; }
                 await sleep(500);
             }
-
-            const failed = roles.Gump.failed.length + roles.Recruit.failed.length + cleared.failed.length;
-            if (failed === 0) writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, completionSignature);
+            if (failed === 0 && notFriends === 0 && requestFailed === 0) writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, completionSignature);
             else removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
-
-            const sections = [];
-            for (const role of ['Gump', 'Recruit']) {
-                const r = roles[role], q = requests[role];
-                if (!r.detected && !r.missing.length && !r.prefixed && !r.failed.length) continue;
-                sections.push({
-                    title: role + ' members detected: ' + r.detected,
-                    lines: [
-                        { label: 'Successfully prefixed with ' + role, count: r.prefixed, status: 'success' },
-                        { label: 'Not currently Steam friends', count: r.missing.length, status: r.missing.length ? 'warning' : 'muted', ids: r.missing },
-                        { label: 'Friend requests sent', count: q.sent.length, status: 'success', ids: q.sent },
-                        { label: 'Requests already pending', count: q.pending.length, status: 'muted', ids: q.pending },
-                        { label: 'Requests on cooldown', count: q.cooldown.length, status: 'muted', ids: q.cooldown },
-                        { label: 'Friend request failures', count: q.failed.length, status: q.failed.length ? 'danger' : 'muted', ids: q.failed },
-                        { label: 'Prefix changes not verified', count: r.failed.length, status: r.failed.length ? 'danger' : 'success', ids: r.failed }
-                    ]
-                });
-            }
-            if (cleared.detected) {
-                sections.push({
-                    title: 'Members no longer holding Gump or Recruit: ' + cleared.detected,
-                    lines: [
-                        { label: 'Prefixes successfully removed', count: cleared.removed, status: 'success' },
-                        { label: 'Not currently Steam friends', count: cleared.missing.length, status: cleared.missing.length ? 'warning' : 'muted', ids: cleared.missing },
-                        { label: 'Removals not verified', count: cleared.failed.length, status: cleared.failed.length ? 'danger' : 'success', ids: cleared.failed }
-                    ]
-                });
-            }
-            const detected = roles.Gump.detected + roles.Recruit.detected + cleared.detected;
-            const verified = roles.Gump.prefixed + roles.Recruit.prefixed + cleared.removed;
-            const missing = roles.Gump.missing.length + roles.Recruit.missing.length + cleared.missing.length;
-            const requestFailures = requests.Gump.failed.length + requests.Recruit.failed.length;
-            saveAndRenderSyncReport({
-                title: failed || requestFailures || missing ? 'Nickname Sync Results — Review' : 'Nickname Sync Results — Complete',
-                sections: sections,
-                totals: {
-                    'Members detected': detected,
-                    'Nickname changes verified': verified,
-                    'Nickname changes not verified': failed,
-                    'Members not currently Steam friends': missing
-                },
-                warning: failed || requestFailures
-                    ? 'Some actions could not be confirmed. Failed SteamIDs above link directly to their Steam profiles. Run Sync All Nicknames again after reviewing.'
-                    : missing
-                        ? 'Members who are not yet Steam friends will receive their role prefix after they accept your friend request. Hidden or unloaded Steam friends may not be included in this scan.'
-                        : 'All attempted nickname changes were verified against Steam. Hidden or unloaded Steam friends may not be included in this scan.'
-            });
-            setStatus(failed || requestFailures ? 'Sync finished with items needing attention.' : 'Sync report ready.',
-                verified + ' nickname changes verified; ' + failed + ' not verified; ' + missing + ' members are not currently Steam friends.');
-        } catch (error) {
-            setStatus(error.message || 'Sync failed. No automatic nickname clearing was performed.');
-        } finally {
-            syncRunning = false;
-            setButtonDisabled(false);
-        }
+            const verified = verifiedPrefixes + verifiedRemovals;
+            const needsAttention = failed > 0 || notFriends > 0 || requestFailed > 0;
+            setStatus(needsAttention ? 'Sync finished with items needing attention.' : 'All eligible nickname changes verified.',
+                verified + ' nickname changes verified (' + verifiedPrefixes + ' prefixes, ' + verifiedRemovals + ' removals); ' + failed + ' failed; ' + notFriends + ' Discord members are not Steam friends; ' + requestsSent + ' friend requests sent; ' + requestPending + ' already pending; ' + requestFailed + ' request failures.');
+        } catch (error) { setStatus(error.message || 'Sync failed. No nickname changes were confirmed.'); }
+        finally { syncRunning = false; setButtonDisabled(false); }
     }
-
     async function clearAllFriendNicknames() {
         if (syncRunning) return;
-        if (!isFriendsPage()) {
-            setStatus('Open Steam → Friends first.');
-            return;
-        }
-
-        if (!getSteamApiKey()) {
-            setStatus('Set your Steam Web API key before removing nicknames so each removal can be verified.');
-            return;
-        }
-        if (!confirm('Remove local nicknames from the friends currently loaded in Steam’s Friends list? This only covers entries Steam has rendered on this page; hidden, paginated, or not-yet-loaded friends may not be included. This is an explicit manual action.')) return;
-
-        syncRunning = true;
-        stopRequested = false;
-        setButtonDisabled(true);
-
+        if (!isFriendsPage()) { setStatus('Open Steam → Friends first.'); return; }
+        if (!getSteamApiKey()) { setStatus('Set your Steam Web API key before removing nicknames so each removal can be verified.'); return; }
+        if (!confirm('Remove local nicknames from every friend returned by Steam’s official Friends API? This uses the complete API friend list rather than only friends currently visible on the page. This is an explicit manual action.')) return;
+        syncRunning = true; stopRequested = false; setButtonDisabled(true);
         try {
             const currentSteamId = getSteamId();
-            if (!currentSteamId) {
-                throw new Error('Could not determine your Steam ID. Open Steam → Friends and try again.');
-            }
-
-            const scannedFriends = await scanFriends();
-
-            // Only process valid 17-digit Steam IDs and NEVER modify the logged-in user's own nickname.
-            const friends = new Map(
-                [...scannedFriends.entries()].filter(([steamId]) => {
-                    const id = String(steamId || '').trim();
-                    return /^\d{17}$/.test(id) && id !== currentSteamId;
-                })
-            );
-
-            let completed = 0;
-            let failed = 0;
-            const failedSteamIds = [];
+            if (!currentSteamId) throw new Error('Could not determine your Steam ID. Open Steam → Friends and try again.');
+            const friends = await scanFriends();
+            friends.delete(currentSteamId);
+            let completed = 0, failed = 0;
             for (const steamId of friends.keys()) {
                 if (stopRequested) throw new Error('Sync stopped.');
-                completed++;
-                setStatus(
-                    'Removing friend nicknames…',
-                    `Processing ${completed} / ${friends.size}${failed ? ` — ${failed} failed` : ''}`
-                );
-                try {
-                    await setSteamNickname(steamId, '');
-                } catch (error) {
-                    failed++;
-                    failedSteamIds.push(steamId);
-                }
+                completed++; setStatus('Removing friend nicknames…', 'Processing ' + completed + ' / ' + friends.size + (failed ? ' — ' + failed + ' failed' : ''));
+                try { await setSteamNickname(steamId, ''); } catch { failed++; }
                 await sleep(500);
             }
-
-            // Invalidate the old signature after any partial clear so the next
-            // manual/automatic sync reconciles successful changes as well.
             removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
-
-            const clearedCount = friends.size - failed;
-            saveAndRenderSyncReport({
-                title: failed ? 'Remove All Results — Review' : 'Remove All Results — Complete',
-                sections: [{
-                    title: 'Steam friends scanned: ' + friends.size,
-                    lines: [
-                        { label: 'Nicknames successfully removed and verified', count: clearedCount, status: 'success' },
-                        { label: 'Removals not verified', count: failed, status: failed ? 'danger' : 'success', ids: failedSteamIds }
-                    ]
-                }],
-                totals: { 'Friends scanned': friends.size, 'Removals verified': clearedCount, 'Removals not verified': failed },
-                warning: failed
-                    ? 'Some removals could not be confirmed. Failed SteamIDs link directly to their Steam profiles. Run Remove All again after reviewing.'
-                    : 'All removals were verified. This only covers friends currently rendered in Steam’s Friends list.'
-            });
-            removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
-            setStatus(failed ? 'Remove All finished with items needing attention.' : 'Remove All report ready.',
-                clearedCount + ' nickname removals verified; ' + failed + ' not verified.');
-        } catch (error) {
-            setStatus(error.message || 'Could not remove friend nicknames.');
-        } finally {
-            syncRunning = false;
-            setButtonDisabled(false);
-        }
+            setStatus(failed ? 'Remove All finished with items needing attention.' : 'All friend nickname removals verified.',
+                (completed - failed) + ' nickname removals verified; ' + failed + ' not verified across ' + friends.size + ' Steam friends.');
+        } catch (error) { setStatus(error.message || 'Could not remove friend nicknames.'); }
+        finally { syncRunning = false; setButtonDisabled(false); }
     }
-
     function setupCustomPrefix(role) {
         const otherRole = role === 'Gump' ? 'Recruit' : 'Gump';
         const key = role === 'Gump' ? GUMP_CUSTOM_PREFIX_KEY : RECRUIT_CUSTOM_PREFIX_KEY;
@@ -1189,19 +955,6 @@
         #discord-steam-sync-status{margin-top:4px!important;line-height:1.35!important;min-height:38px!important;color:#d7d7d7!important}
         #discord-steam-sync-progress{margin-top:5px!important;color:#8f98a0!important;font-size:12px!important}
         #discord-steam-sync-panel{width:380px!important;max-height:75vh!important;overflow-y:auto!important}
-        #discord-steam-sync-report{margin-top:12px!important;padding-top:10px!important;border-top:1px solid #3b4450!important;font-size:12px!important;line-height:1.4!important}
-        #discord-steam-sync-report .sync-report-heading{font-size:14px!important;font-weight:700!important;margin-bottom:8px!important;color:#fff!important}
-        #discord-steam-sync-report .sync-report-section{padding:7px 0!important;border-top:1px solid #303944!important}
-        #discord-steam-sync-report .sync-report-section-title{font-weight:700!important;color:#e6e9ed!important;margin-bottom:5px!important}
-        #discord-steam-sync-report .sync-report-row{display:flex!important;justify-content:space-between!important;gap:8px!important;margin:3px 0!important}
-        #discord-steam-sync-report .sync-report-row strong{white-space:nowrap!important}
-        #discord-steam-sync-report .sync-report-success{color:#70c080!important}
-        #discord-steam-sync-report .sync-report-danger{color:#ff7777!important}
-        #discord-steam-sync-report .sync-report-warning{color:#e6bd59!important}
-        #discord-steam-sync-report .sync-report-muted{color:#aab2bb!important}
-        #discord-steam-sync-report .sync-report-ids{display:flex!important;flex-wrap:wrap!important;gap:4px 9px!important;margin:3px 0 6px 8px!important}
-        #discord-steam-sync-report .sync-report-ids a{color:#8abfff!important;text-decoration:underline!important}
-        #discord-steam-sync-report .sync-report-warning{margin-top:8px!important;padding:7px!important;border-radius:4px!important;background:#493c20!important;color:#f1d58a!important}
     `;
 
     function injectUIStyle() {
@@ -1266,7 +1019,6 @@
             setStatus('Stopping after the current request…');
         });
 
-        restoreSyncReport();
 
         const hasToken = Boolean(getToken());
         const hasApiKey = Boolean(getSteamApiKey());

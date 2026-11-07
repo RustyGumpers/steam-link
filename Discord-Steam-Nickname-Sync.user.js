@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.11
+// @version      11.12
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -34,12 +34,14 @@
     const AUTO_SCAN_RETRIES = 8;
     const AUTO_SCAN_RETRY_DELAY_MS = 5000;
     const POLL_INTERVAL_MS = 15000;
+    const FRIEND_COVERAGE_RECHECK_MS = 60000;
     const REQUEST_TIMEOUT_MS = 15000;
     const MAX_NICKNAME_LENGTH = 32;
 
     let stopRequested = false;
     let syncRunning = false;
     let pollTimer = null;
+    let lastFriendCoverageCheckAt = 0;
 
     function readStoredValue(key, fallback = '') {
         try {
@@ -300,22 +302,13 @@
     function getSteamDisplayName(block) {
         if (!block) return '';
 
-        // Steam's current Friends-page friend entries commonly expose the
-        // real profile/display name through data-search. Local nicknames are
-        // separate from the Steam persona name, so this remains available
-        // after Remove All Friend Nicknames clears the local nickname.
-        const searchName = trimNickname(
-            block.getAttribute?.('data-search')?.split(' ;')[0] ||
-            block.getAttribute?.('data-search') ||
-            ''
-        );
-        if (searchName) return searchName;
-
-        // Support the other Steam friend-list layouts as fallbacks.
+        // Prefer Steam's visible persona/display-name element. This avoids
+        // accidentally treating a local nickname as the persona name if Steam
+        // changes the data-search contents.
         const selectors = [
+            '.persona_name',
             '.friendname',
             '.friendName',
-            '.persona_name',
             '.friend_block_content .friendname',
             '.friend_block_content .friendName',
             '.friend_block_content a[href*="/profiles/"]',
@@ -331,6 +324,15 @@
         if (block.matches?.('a[href*="/profiles/"]')) {
             const name = trimNickname(block.textContent || '');
             if (name) return name;
+        }
+
+        // Steam friend entries have historically exposed the persona name in
+        // data-search as the first value before " ;". Keep this as a final
+        // fallback for layouts where the visible name element is unavailable.
+        const dataSearch = String(block.getAttribute?.('data-search') || '');
+        if (dataSearch) {
+            const searchName = trimNickname(dataSearch.split(/s*;s*/)[0] || '');
+            if (searchName) return searchName;
         }
 
         return '';
@@ -353,13 +355,46 @@
     }
 
     async function scanFriends() {
+        let bestFriends = new Map();
+        let stableScans = 0;
+        let previousSize = -1;
+
         for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
             if (stopRequested) throw new Error('Sync stopped.');
+
             const friends = getFriendBlocks();
-            if (friends.size > 0) return friends;
-            setStatus('Waiting for Steam friends to finish loading…', `Scan ${attempt}/${AUTO_SCAN_RETRIES}`);
+
+            if (friends.size > bestFriends.size) {
+                bestFriends = friends;
+            }
+
+            if (friends.size > 0 && friends.size === previousSize) {
+                stableScans++;
+            } else {
+                stableScans = 0;
+            }
+            previousSize = friends.size;
+
+            // Steam can populate the Friends page incrementally. Require two
+            // consecutive scans with the same non-zero count before treating
+            // the DOM as ready, while still keeping the largest scan seen.
+            if (bestFriends.size > 0 && stableScans >= 1) {
+                lastFriendCoverageCheckAt = Date.now();
+                return bestFriends;
+            }
+
+            setStatus(
+                'Waiting for Steam friends to finish loading…',
+                `Scan ${attempt}/${AUTO_SCAN_RETRIES} — found ${bestFriends.size} friend(s)`
+            );
             await sleep(AUTO_SCAN_RETRY_DELAY_MS);
         }
+
+        if (bestFriends.size > 0) {
+            lastFriendCoverageCheckAt = Date.now();
+            return bestFriends;
+        }
+
         throw new Error('Steam friend list could not be read. Make sure the Friends page is open and loaded.');
     }
 
@@ -385,9 +420,6 @@
         const last = Number(state[steamId] || 0);
         if (Date.now() - last < FRIEND_REQUEST_COOLDOWN_MS) return 'throttled';
 
-        state[steamId] = Date.now();
-        writeFriendRequestState(state);
-
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
@@ -397,10 +429,37 @@
                 onload: response => {
                     const text = String(response.responseText || '').toLowerCase();
                     if (response.status >= 200 && response.status < 300) {
-                        if (/already|pending|request|friend/.test(text)) return resolve('pending');
+                        let parsed = null;
+                        try {
+                            parsed = JSON.parse(String(response.responseText || ''));
+                        } catch {}
+
+                        const explicitFailure =
+                            parsed?.success === false ||
+                            parsed?.success === 0 ||
+                            /error|failed|failure|denied|blocked|limited/.test(text);
+
+                        const alreadyPending =
+                            /already\s+friends|already\s+sent|pending|duplicate|request\s+(?:already\s+)?sent/.test(text);
+
+                        if (explicitFailure && !alreadyPending) {
+                            reject(new Error(`Steam friend request was rejected for ${steamId}.`));
+                            return;
+                        }
+
+                        state[steamId] = Date.now();
+                        writeFriendRequestState(state);
+
+                        if (alreadyPending) return resolve('pending');
                         return resolve('sent');
                     }
-                    if (/already|pending|request/.test(text)) return resolve('pending');
+
+                    if (/already\s+friends|already\s+sent|pending|duplicate/.test(text)) {
+                        state[steamId] = Date.now();
+                        writeFriendRequestState(state);
+                        return resolve('pending');
+                    }
+
                     reject(new Error(`Steam friend request failed for ${steamId}.`));
                 },
                 onerror: () => reject(new Error(`Steam friend request failed for ${steamId}.`))
@@ -442,6 +501,15 @@
                 onerror: () => reject(new Error(`Steam nickname update failed for ${steamId}.`))
             });
         });
+    }
+
+    function friendCoverageSignature(states, friends) {
+        return states
+            .map(item => getStateSteamId(item))
+            .filter(Boolean)
+            .sort()
+            .map(steamId => `${steamId}:${friends.has(steamId) ? 'friend' : 'missing'}`)
+            .join('|');
     }
 
     function stateSignature(states) {
@@ -492,12 +560,28 @@
 
             const signature = stateSignature(data.states);
             const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
-            if (!force && signature === previous) {
+
+            // A Discord-only signature cannot tell when a previously missing
+            // Steam friend accepts an invite. Periodically rescan the friend
+            // list so newly accepted friends become eligible for nickname sync.
+            const needsCoverageCheck =
+                force ||
+                signature !== previous ||
+                Date.now() - lastFriendCoverageCheckAt >= FRIEND_COVERAGE_RECHECK_MS;
+
+            if (!needsCoverageCheck) {
                 setStatus('Already synchronized.');
                 return;
             }
 
             const friends = await scanFriends();
+            const coverageSignature = friendCoverageSignature(data.states, friends);
+            const completionSignature = `${signature}\n#coverage:${coverageSignature}`;
+
+            if (!force && completionSignature === previous) {
+                setStatus('Already synchronized.');
+                return;
+            }
             const stateBySteamId = new Map();
             for (const state of data.states) {
                 const steamId = getStateSteamId(state);
@@ -606,7 +690,7 @@
                 await sleep(500);
             }
 
-            writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature);
+            writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, completionSignature);
             setStatus(`Sync complete — ${totalEntries} nickname(s) reconciled.`);
             await sleep(2500);
             location.reload();

@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.38
+// @version      11.39
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -889,16 +889,26 @@
                     if (savedNickname && hasManagedRolePrefix(savedNickname)) clearStates.set(id, state);
                 }
             }
-            const expected = [
-                ...[...desired.entries()].filter(([id]) => friends.has(id)).map(([id, state]) => id + ':' + buildSteamNickname(state, friends.get(id))),
-                ...[...clearStates.keys()].filter(id => friends.has(id)).map(id => {
-                    const name = getSteamDisplayName(friends.get(id));
+            const expectedChanges = [
+                ...[...desired.entries()].filter(([id]) => friends.has(id)).map(([steamId, state]) => ({
+                    steamId, nickname: buildSteamNickname(state, friends.get(steamId)), type: 'prefix'
+                })),
+                ...[...clearStates.entries()].filter(([id]) => friends.has(id)).map(([steamId]) => {
+                    const name = getSteamDisplayName(friends.get(steamId));
                     if (!name) throw new Error('Could not read a Steam display name for one of the friends being cleared.');
-                    return id + ':' + name;
+                    return { steamId, nickname: name, type: 'removal' };
                 })
-            ].sort().join('|');
-            const completionSignature = signature + '\n#coverage:' + coverage + '\n#nicknames:' + expected;
-            if (!force && completionSignature === previous) { setStatus('Already synchronized.'); return; }
+            ].sort((a, b) => a.steamId.localeCompare(b.steamId));
+
+            const expected = JSON.stringify(expectedChanges.map(change => [change.steamId, change.type, change.nickname]));
+            const completionSignature = signature + '\\n#coverage:' + coverage + '\\n#nicknames:' + expected;
+            const needsNicknameChanges = expectedChanges.some(change =>
+                getSavedNicknameForSteamId(savedNicknames, change.steamId) !== change.nickname
+            );
+            if (!force && completionSignature === previous && !needsNicknameChanges) {
+                setStatus('Already synchronized.');
+                return;
+            }
 
             notFriends = [...desired.keys(), ...clearStates.keys()].filter(id => !friends.has(id)).length;
             for (const [id] of desired) {
@@ -913,16 +923,7 @@
                 await sleep(500);
             }
 
-            const changes = [
-                ...[...desired.entries()].filter(([id]) => friends.has(id)).map(([steamId, state]) => ({
-                    steamId, nickname: buildSteamNickname(state, friends.get(steamId)), type: 'prefix'
-                })),
-                ...[...clearStates.entries()].filter(([id]) => friends.has(id)).map(([steamId]) => {
-                    const name = getSteamDisplayName(friends.get(steamId));
-                    if (!name) throw new Error('Could not read a Steam display name for one of the friends being cleared.');
-                    return { steamId, nickname: name, type: 'removal' };
-                })
-            ];
+            const changes = expectedChanges;
             const result = await applyAndVerifyNicknameBatch(changes, 'Applying Discord role prefixes and removals…');
             verifiedPrefixes = result.verified.filter(item => item.type === 'prefix').length;
             verifiedRemovals = result.verified.filter(item => item.type === 'removal').length;

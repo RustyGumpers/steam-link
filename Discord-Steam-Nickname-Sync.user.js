@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.29
+// @version      11.30
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -30,6 +30,7 @@
     const GUMP_CUSTOM_PREFIX_KEY = 'discordSteamSyncGumpPrefixV1';
     const RECRUIT_CUSTOM_PREFIX_KEY = 'discordSteamSyncRecruitPrefixV1';
     const LEGACY_CUSTOM_PREFIX_KEY = 'discordSteamSyncCustomPrefixV1';
+    const MANAGED_PREFIXES_KEY = 'discordSteamSyncManagedPrefixesV1';
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV10';
     const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
@@ -60,7 +61,14 @@
     }
 
     function writeStoredValue(key, value) {
-        try { GM_setValue(key, value); } catch {}
+        // Keep secrets and script state in Tampermonkey's isolated storage.
+        // localStorage is only a compatibility fallback for older managers.
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(key, value);
+                return;
+            }
+        } catch {}
         try { localStorage.setItem(key, String(value)); } catch {}
     }
 
@@ -86,13 +94,46 @@
         return trimNickname(customPrefix || role);
     }
 
+    function readManagedPrefixes() {
+        try {
+            const raw = readStoredValue(MANAGED_PREFIXES_KEY, '[]');
+            const parsed = JSON.parse(raw || '[]');
+            return Array.isArray(parsed) ? parsed.map(value => trimNickname(value)).filter(Boolean) : [];
+        } catch {
+            return [];
+        }
+    }
+
+    function rememberManagedPrefix(prefix) {
+        const value = trimNickname(prefix);
+        if (!value) return;
+        const prefixes = readManagedPrefixes();
+        if (!prefixes.some(item => item.toLowerCase() === value.toLowerCase())) {
+            prefixes.push(value);
+            writeStoredValue(MANAGED_PREFIXES_KEY, JSON.stringify(prefixes.slice(-50)));
+        }
+    }
+
+    function getAllManagedPrefixes() {
+        return [...new Set([
+            'Gump', 'Recruit',
+            getEffectivePrefix('Gump'),
+            getEffectivePrefix('Recruit'),
+            ...readManagedPrefixes()
+        ].map(value => trimNickname(value)).filter(Boolean))];
+    }
+
     function migrateLegacyPrefix() {
+        const gumpCurrent = getCustomPrefix('Gump');
+        const recruitCurrent = getCustomPrefix('Recruit');
+        rememberManagedPrefix(gumpCurrent);
+        rememberManagedPrefix(recruitCurrent);
+
         const legacy = trimNickname(readStoredValue(LEGACY_CUSTOM_PREFIX_KEY, '') || '');
         if (!legacy) return;
 
-        const gumpCurrent = getCustomPrefix('Gump');
-        const recruitCurrent = getCustomPrefix('Recruit');
         if (gumpCurrent || recruitCurrent) {
+            rememberManagedPrefix(legacy);
             removeStoredValue(LEGACY_CUSTOM_PREFIX_KEY);
             return;
         }
@@ -104,6 +145,7 @@
         } else {
             writeStoredValue(GUMP_CUSTOM_PREFIX_KEY, legacy);
         }
+        rememberManagedPrefix(legacy);
         removeStoredValue(LEGACY_CUSTOM_PREFIX_KEY);
     }
 
@@ -118,11 +160,12 @@
     }
 
     function trimNickname(value) {
-        return String(value || '')
-            .replace(/[\r\n]+/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, MAX_NICKNAME_LENGTH);
+        const normalized = String(value || '')
+            .replace(/[\\r\\n]+/g, ' ')
+            .replace(/\\s+/g, ' ')
+            .trim();
+        // Count Unicode code points so a 32-character limit never splits an emoji.
+        return Array.from(normalized).slice(0, MAX_NICKNAME_LENGTH).join('');
     }
 
     function getSteamId() {
@@ -624,14 +667,9 @@
 
     function hasManagedRolePrefix(nickname) {
         const value = trimNickname(nickname).toLowerCase();
-        return ['Gump', 'Recruit'].some(role => {
-            // Recognize both the built-in role label and the currently
-            // configured custom prefix when deciding whether a clear is safe.
-            const prefixes = [role, getEffectivePrefix(role)];
-            return prefixes.some(prefix => {
-                const normalized = trimNickname(prefix).toLowerCase();
-                return normalized && value.startsWith(normalized + ' ');
-            });
+        return getAllManagedPrefixes().some(prefix => {
+            const normalized = prefix.toLowerCase();
+            return normalized && value.startsWith(normalized + ' ');
         });
     }
 
@@ -868,6 +906,8 @@
             return;
         }
 
+        rememberManagedPrefix(current || role);
+        rememberManagedPrefix(proposedPrefix);
         writeStoredValue(key, prefix);
 
         if (prefix) {

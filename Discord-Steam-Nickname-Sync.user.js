@@ -255,7 +255,9 @@
         for (const node of document.querySelectorAll('[data-steamid]')) {
             const steamId = String(node.getAttribute('data-steamid') || '').trim();
             if (/^\d{17}$/.test(steamId)) {
-                const block = node.closest('.friend_block_v2, .friend_block, .friend_block_content') || node;
+                const block = node.closest('.friend_block_v2, .friend_block')
+                    || node.closest('.friend_block_content')
+                    || node;
                 friends.set(steamId, block);
             }
         }
@@ -276,7 +278,8 @@
 
             const steamId = match[1];
             const block =
-                link.closest('.friend_block_v2, .friend_block, .friend_block_content, [data-steamid]')
+                link.closest('.friend_block_v2, .friend_block, [data-steamid]')
+                || link.closest('.friend_block_content')
                 || link;
 
             friends.set(steamId, block);
@@ -363,7 +366,6 @@
         let bestFriends = new Map();
         let stableScans = 0;
         let previousSignature = '';
-        let previousSize = -1;
 
         for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
             if (stopRequested) throw new Error('Sync stopped.');
@@ -381,7 +383,6 @@
                 stableScans = 0;
             }
             previousSignature = scanSignature;
-            previousSize = friends.size;
 
             // Steam can populate the Friends page incrementally. Require two
             // consecutive scans with the same non-zero count before treating
@@ -489,7 +490,10 @@
     }
 
     function getSteamApiKey() {
-        return String(readStoredValue(STEAM_API_KEY_STORAGE, '') || '').trim();
+        // Keep the Steam Web API key in Tampermonkey's private script storage;
+        // do not mirror it into page-accessible localStorage.
+        try { return String(GM_getValue(STEAM_API_KEY_STORAGE, '') || '').trim(); }
+        catch { return ''; }
     }
 
     function setupSteamApiKey() {
@@ -506,7 +510,11 @@
             alert('That does not look like a valid Steam Web API key.');
             return;
         }
-        writeStoredValue(STEAM_API_KEY_STORAGE, value);
+        try { GM_setValue(STEAM_API_KEY_STORAGE, value); }
+        catch {
+            setStatus('Could not securely save the Steam Web API key in Tampermonkey storage.');
+            return;
+        }
         setStatus('Steam Web API key saved. Testing nickname-list access…');
         getSteamNicknameList()
             .then(() => setStatus('Steam nickname verification is ready.'))
@@ -686,11 +694,13 @@
             if (Number(data.memberCount || 0) > 0 && Number(data.fetchedMemberCount || data.memberCount) < Number(data.memberCount)) {
                 throw new Error('Discord member data is incomplete. No nicknames were changed.');
             }
-            if (data.states.length === 0 && Number(data.memberCount || 0) > 0) {
-                throw new Error('Discord returned an empty sync state. No nicknames were changed.');
-            }
 
             const signature = stateSignature(data.states);
+            if (data.states.length === 0) {
+                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, `${signature}\\n#coverage:`);
+                setStatus('No linked Discord accounts need nickname changes.');
+                return;
+            }
             const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
 
             // A Discord-only signature cannot tell when a previously missing
@@ -964,6 +974,7 @@
     let uiObserver = null;
     let uiRetryTimer = null;
     let uiStyleInjected = false;
+    let uiDismissed = false;
 
     const UI_CSS = `
         #discord-steam-sync-panel{position:fixed!important;right:18px!important;bottom:18px!important;z-index:2147483647!important;width:310px!important;background:#171d25!important;color:#d6d7d8!important;border:1px solid #3b4450!important;border-radius:6px!important;box-shadow:0 8px 30px rgba(0,0,0,.55)!important;font:14px Arial,sans-serif!important;display:block!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important}
@@ -1025,7 +1036,10 @@
         `;
         document.body.appendChild(panel);
 
-        panel.querySelector('#discord-steam-sync-close').addEventListener('click', () => panel.remove());
+        panel.querySelector('#discord-steam-sync-close').addEventListener('click', () => {
+            uiDismissed = true;
+            panel.remove();
+        });
         panel.querySelector('#discord-steam-sync-button').addEventListener('click', () => syncNicknames(true));
         panel.querySelector('#discord-steam-sync-setup').addEventListener('click', setupToken);
         panel.querySelector('#discord-steam-sync-api-key').addEventListener('click', setupSteamApiKey);
@@ -1050,7 +1064,7 @@
     }
 
     function ensureUI() {
-        if (document.querySelector('#discord-steam-sync-panel')) return;
+        if (uiDismissed || document.querySelector('#discord-steam-sync-panel')) return;
         if (buildUI()) return;
 
         clearTimeout(uiRetryTimer);
@@ -1062,7 +1076,7 @@
 
         if (uiObserver || !document.documentElement) return;
         uiObserver = new MutationObserver(() => {
-            if (!document.querySelector('#discord-steam-sync-panel')) ensureUI();
+            if (!uiDismissed && !document.querySelector('#discord-steam-sync-panel')) ensureUI();
         });
         uiObserver.observe(document.documentElement, { childList: true, subtree: true });
     }

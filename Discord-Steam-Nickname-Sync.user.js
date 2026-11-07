@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.25
+// @version      11.26
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -422,6 +422,9 @@
 
     function getSteamDisplayName(block) {
         if (!block) return '';
+        // Official Steam Web API friend records are normalized to this shape.
+        const apiPersonaName = trimNickname(block.personaName || block.personaname || '');
+        if (apiPersonaName) return apiPersonaName;
 
         // Prefer Steam's visible persona/display-name element. This avoids
         // accidentally treating a local nickname as the persona name if Steam
@@ -475,45 +478,93 @@
         return applyCustomPrefix(rolePrefix + ' ' + steamName, rolePrefix);
     }
 
-    async function scanFriends() {
-        let bestSnapshot = { friends: new Map(), complete: false, reason: 'Friend list has not loaded.' };
-        let stableScans = 0;
-        let previousSignature = null;
+    async function steamApiRequest(url, label) {
+        const response = await new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                timeout: REQUEST_TIMEOUT_MS,
+                headers: { Accept: 'application/json' },
+                onload: resolve,
+                onerror: () => reject(new Error(`Could not contact Steam to retrieve ${label}.`)),
+                ontimeout: () => reject(new Error(`Steam timed out while retrieving ${label}.`))
+            });
+        });
 
-        for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
-            if (stopRequested) throw new Error('Sync stopped.');
-
-            const snapshot = getFriendBlocks();
-            const signature = [...snapshot.friends.keys()].sort().join('|');
-
-            if (snapshot.friends.size >= bestSnapshot.friends.size) bestSnapshot = snapshot;
-
-            if (snapshot.complete && signature === previousSignature) {
-                stableScans++;
-            } else {
-                stableScans = 0;
-            }
-            previousSignature = signature;
-
-            // Require a recognized Steam list container, valid IDs for every
-            // rendered friend block, and two consecutive identical snapshots.
-            // Empty lists are allowed only when the recognized container exists.
-            if (snapshot.complete && stableScans >= 1) {
-                lastFriendCoverageCheckAt = Date.now();
-                return snapshot.friends;
-            }
-
-            setStatus(
-                'Checking Steam friend list…',
-                `Scan ${attempt}/${AUTO_SCAN_RETRIES} — found ${snapshot.friends.size} friend(s)${snapshot.reason ? ' — ' + snapshot.reason : ''}`
+        if (response.status === 401) {
+            throw new Error(
+                'Steam returned HTTP 401 while retrieving your friends list. Your Steam friends list must be public for complete nickname syncing. ' +
+                'Please open your Steam Profile → Edit Profile → Privacy Settings, set “Friends List” to Public, then run Sync All Nicknames again. ' +
+                'No nickname changes were made.'
             );
-            await sleep(AUTO_SCAN_RETRY_DELAY_MS);
+        }
+        if (response.status < 200 || response.status >= 300) {
+            throw new Error(`Steam returned HTTP ${response.status} while retrieving ${label}. No nickname changes were made.`);
         }
 
-        throw new Error(
-            'Could not verify a complete, stable Steam friend-list snapshot. No nickname changes or automatic friend requests were made. ' +
-            (bestSnapshot.reason || 'Reload the Friends page and try again.')
+        let payload;
+        try {
+            payload = JSON.parse(String(response.responseText || '{}'));
+        } catch {
+            throw new Error(`Steam returned invalid data while retrieving ${label}. No nickname changes were made.`);
+        }
+        return payload;
+    }
+
+    async function scanFriends() {
+        const apiKey = getSteamApiKey();
+        const steamId = getSteamId();
+        if (!apiKey) throw new Error('Set your Steam Web API key before syncing so the script can retrieve your complete Steam friends list.');
+        if (!steamId) throw new Error('Could not identify the Steam account for the friends-list request.');
+
+        setStatus('Retrieving your complete Steam friends list from Steam…');
+        const friendPayload = await steamApiRequest(
+            `https://api.steampowered.com/ISteamUser/GetFriendList/v1/?key=${encodeURIComponent(apiKey)}&steamid=${encodeURIComponent(steamId)}&relationship=friend`,
+            'your complete Steam friends list'
         );
+        const friendRows = friendPayload?.friendslist?.friends;
+        if (!Array.isArray(friendRows)) {
+            throw new Error('Steam did not return a complete, readable friends list. Check your Steam privacy settings and API key. No nickname changes were made.');
+        }
+
+        const ids = [...new Set(friendRows.map(row => String(row?.steamid || '').trim()).filter(id => /^\\d{17}$/.test(id)))];
+        if (ids.length !== friendRows.length) {
+            throw new Error('Steam returned a friends list containing missing or invalid SteamIDs. No nickname changes were made.');
+        }
+
+        const friends = new Map();
+        const batchSize = 100;
+        for (let offset = 0; offset < ids.length; offset += batchSize) {
+            if (stopRequested) throw new Error('Sync stopped.');
+            const batch = ids.slice(offset, offset + batchSize);
+            setStatus('Retrieving Steam friend names…', `Loading ${Math.min(offset + batch.length, ids.length)} / ${ids.length}`);
+            const summaryPayload = await steamApiRequest(
+                `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${encodeURIComponent(apiKey)}&steamids=${batch.join(',')}`,
+                'Steam friend profile names'
+            );
+            const players = summaryPayload?.response?.players;
+            if (!Array.isArray(players)) {
+                throw new Error('Steam did not return readable profile names for the complete friends list. No nickname changes were made.');
+            }
+            for (const player of players) {
+                const id = String(player?.steamid || '').trim();
+                const personaName = trimNickname(player?.personaname || '');
+                if (/^\\d{17}$/.test(id) && personaName) friends.set(id, { personaName });
+            }
+            await sleep(150);
+        }
+
+        const missingNames = ids.filter(id => !friends.has(id));
+        if (missingNames.length) {
+            throw new Error(
+                `Steam returned ${ids.length} friends, but profile names could only be verified for ${friends.size}. ` +
+                `The list is not considered complete. No nickname changes were made. Missing SteamIDs: ${missingNames.slice(0, 10).join(', ')}${missingNames.length > 10 ? ', …' : ''}`
+            );
+        }
+
+        lastFriendCoverageCheckAt = Date.now();
+        setStatus('Complete Steam friends list retrieved.', `${friends.size} friends verified through Steam Web API`);
+        return friends;
     }
 
     function readFriendRequestState() {
@@ -610,7 +661,7 @@
         const instructions =
             'STEAM NICKNAME VERIFICATION — API KEY SETUP\\n\\n' +
             'WHY THIS IS NEEDED\\n' +
-            'Steam can report a nickname update as successful even when it was not saved. This key lets the script ask Steam for your saved local nickname list so it can verify changes.\\n\\n' +
+            'Steam can report a nickname update as successful even when it was not saved. This key lets the script retrieve your complete Steam friends list and saved local nickname list so it can verify who should be updated and whether changes were saved.\\n\\n' +
             'HOW TO GET YOUR KEY\\n' +
             '1. Open https://steamcommunity.com/dev/apikey in a new tab.\\n' +
             '2. Sign in to the same Steam account you use with this script.\\n' +
@@ -619,7 +670,7 @@
             '5. Return here, paste the key below, and select OK.\\n\\n' +
             'PRIVACY — PLEASE READ\\n' +
             '• The key is saved only in this browser’s Tampermonkey storage.\\n' +
-            '• The script sends the key directly to Steam’s official Web API only to retrieve your nickname list.\\n' +
+            '• The script sends the key directly to Steam’s official Web API to retrieve your friends list, profile display names, and saved local nickname list.\\n' +
             '• The key is NOT sent to our Discord bot, Railway server, or GitHub.\\n' +
             '• We do not ask for your Steam password, Steam session cookie, or Discord credentials.\\n' +
             '• The key is not needed by the bot and is not shared with other users.\\n\\n' +
@@ -645,7 +696,7 @@
         }
         setStatus('Steam Web API key saved locally. Testing direct access to Steam…');
         getSteamNicknameList()
-            .then(() => setStatus('Steam nickname verification is ready. Your key remains stored locally.'))
+            .then(() => setStatus('Steam API access is ready. Your key remains stored locally. Your Friends List must be Public for complete syncing.'))
             .catch(error => setStatus(error.message || 'Steam nickname verification test failed.'));
     }
 

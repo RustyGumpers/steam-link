@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.37
+// @version      11.38
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -755,6 +755,14 @@
     }
 
     async function applyAndVerifyNicknameBatch(changes, progressLabel) {
+        const seenIds = new Set();
+        for (const change of changes) {
+            if (!/^\\d{17}$/.test(String(change?.steamId || '')) || seenIds.has(change.steamId)) {
+                throw new Error('Nickname batch contains an invalid or duplicate SteamID. No nickname changes were submitted.');
+            }
+            seenIds.add(change.steamId);
+            change.nickname = trimNickname(change.nickname);
+        }
         const attempted = [];
         const requestErrors = new Map();
         let processed = 0;
@@ -764,7 +772,7 @@
             attempted.push(change);
             try { await postSteamNickname(change.steamId, change.nickname); }
             catch (error) { requestErrors.set(change.steamId, error?.message || 'Steam rejected the nickname update.'); }
-            await sleep(350);
+            await sleep(500);
         }
         if (!attempted.length) return { verified: [], failed: [] };
 
@@ -781,13 +789,14 @@
 
         const initiallyMatched = attempted.filter(change => nicknameMatches(firstSnapshot, change.steamId, change.nickname));
         let mismatches = attempted.filter(change => !nicknameMatches(firstSnapshot, change.steamId, change.nickname));
+        let retryVerified = [];
         if (mismatches.length) {
             await sleep(NICKNAME_VERIFY_DELAY_MS);
             for (const change of mismatches) {
                 if (stopRequested) throw new Error('Sync stopped.');
                 try { await postSteamNickname(change.steamId, change.nickname); }
                 catch (error) { requestErrors.set(change.steamId, error?.message || 'Steam rejected the retry.'); }
-                await sleep(350);
+                await sleep(500);
             }
             let finalSnapshot;
             try {
@@ -802,7 +811,8 @@
                     }))
                 };
             }
-            mismatches = attempted.filter(change => !nicknameMatches(finalSnapshot, change.steamId, change.nickname));
+            retryVerified = mismatches.filter(change => nicknameMatches(finalSnapshot, change.steamId, change.nickname));
+            mismatches = mismatches.filter(change => !nicknameMatches(finalSnapshot, change.steamId, change.nickname));
         }
         const failed = mismatches.map(change => ({
             steamId: change.steamId,
@@ -810,7 +820,8 @@
                 (change.nickname ? 'Steam did not save the expected nickname.' : 'Steam did not confirm removal of the local nickname.')
         }));
         const failedIds = new Set(failed.map(item => item.steamId));
-        return { verified: attempted.filter(change => !failedIds.has(change.steamId)), failed };
+        const verifiedIds = new Set([...initiallyMatched, ...retryVerified].map(change => change.steamId));
+        return { verified: attempted.filter(change => verifiedIds.has(change.steamId) && !failedIds.has(change.steamId)), failed };
     }
 
     function friendCoverageSignature(states, friends) {

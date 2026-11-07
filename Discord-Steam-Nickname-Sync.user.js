@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.32
+// @version      11.33
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -61,16 +61,32 @@
     }
 
     function writeStoredValue(key, value) {
-        // Keep secrets and script state in Tampermonkey's isolated storage.
-        // localStorage is only a compatibility fallback for older managers.
+        // Sync tokens must never fall back to page-readable localStorage.
+        if (key === TOKEN_KEY) {
+            try {
+                if (typeof GM_setValue !== 'function') return false;
+                GM_setValue(key, value);
+                try { localStorage.removeItem(key); } catch {}
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+        // Keep ordinary script state in Tampermonkey storage when available.
         try {
             if (typeof GM_setValue === 'function') {
                 GM_setValue(key, value);
                 try { localStorage.removeItem(key); } catch {}
-                return;
+                return true;
             }
         } catch {}
-        try { localStorage.setItem(key, String(value)); } catch {}
+        try {
+            localStorage.setItem(key, String(value));
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     function removeStoredValue(key) {
@@ -79,10 +95,24 @@
     }
 
     function getToken() {
-        const token = String(readStoredValue(TOKEN_KEY, '') || '').trim();
-        // Migrate any legacy localStorage token into private Tampermonkey storage.
-        if (token) writeStoredValue(TOKEN_KEY, token);
-        return token;
+        let token = '';
+        try {
+            token = String(GM_getValue(TOKEN_KEY, '') || '').trim();
+            if (token) return token;
+        } catch {}
+
+        // Migrate older versions' localStorage token into isolated userscript storage.
+        try { token = String(localStorage.getItem(TOKEN_KEY) || '').trim(); } catch {}
+        if (!token) return '';
+
+        try {
+            if (typeof GM_setValue !== 'function') return '';
+            GM_setValue(TOKEN_KEY, token);
+            try { localStorage.removeItem(TOKEN_KEY); } catch {}
+            return token;
+        } catch {
+            return '';
+        }
     }
 
     function getCustomPrefix(role) {
@@ -937,8 +967,12 @@
             setStatus('Invalid token. Tokens are exactly 64 hexadecimal characters.');
             return;
         }
-        writeStoredValue(TOKEN_KEY, value);
-        setStatus('Token saved. Testing sync…');
+        if (!writeStoredValue(TOKEN_KEY, value)) {
+            setStatus('Could not securely save the sync token in Tampermonkey storage. The token was not saved to page-accessible storage.');
+            alert('Could not securely save the sync token. Please check Tampermonkey storage permissions and try again.');
+            return;
+        }
+        setStatus('Token saved securely. Testing sync…');
         syncNicknames(true).catch(error => setStatus(error.message || 'Token test failed.'));
     }
 

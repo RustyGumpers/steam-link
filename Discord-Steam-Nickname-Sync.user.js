@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.15
+// @version      11.16
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -10,7 +10,6 @@
 // @downloadURL  https://raw.githubusercontent.com/RustyGumpers/steam-link/main/Discord-Steam-Nickname-Sync.user.js
 // @match        https://steamcommunity.com/*
 // @grant        GM_xmlhttpRequest
-// @grant        GM_cookie
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
@@ -26,6 +25,7 @@
 
     const SYNC_API_URL = 'https://steam-link-production.up.railway.app';
     const TOKEN_KEY = 'discordSteamSyncToken';
+    const STEAM_API_KEY_STORAGE = 'discordSteamSyncSteamApiKeyV1';
     const GUMP_CUSTOM_PREFIX_KEY = 'discordSteamSyncGumpPrefixV1';
     const RECRUIT_CUSTOM_PREFIX_KEY = 'discordSteamSyncRecruitPrefixV1';
     const LEGACY_CUSTOM_PREFIX_KEY = 'discordSteamSyncCustomPrefixV1';
@@ -40,6 +40,7 @@
     const REQUEST_TIMEOUT_MS = 15000;
     const NICKNAME_VERIFY_ATTEMPTS = 3;
     const NICKNAME_VERIFY_DELAY_MS = 1500;
+    const STEAM_API_KEY_PATTERN = /^[a-f0-9]{32}$/i;
     const MAX_NICKNAME_LENGTH = 32;
 
     let stopRequested = false;
@@ -361,6 +362,7 @@
     async function scanFriends() {
         let bestFriends = new Map();
         let stableScans = 0;
+        let previousSignature = '';
         let previousSize = -1;
 
         for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
@@ -368,15 +370,17 @@
 
             const friends = getFriendBlocks();
 
-            if (friends.size > bestFriends.size) {
-                bestFriends = friends;
-            }
+            // Keep the latest snapshot when its size is equal or larger; the
+            // IDs can change while the total count stays the same.
+            if (friends.size >= bestFriends.size) bestFriends = friends;
 
-            if (friends.size > 0 && friends.size === previousSize) {
+            const scanSignature = [...friends.keys()].sort().join('|');
+            if (scanSignature && scanSignature === previousSignature) {
                 stableScans++;
             } else {
                 stableScans = 0;
             }
+            previousSignature = scanSignature;
             previousSize = friends.size;
 
             // Steam can populate the Friends page incrementally. Require two
@@ -443,7 +447,7 @@
                         // non-success codes as failures instead of assuming that
                         // any HTTP 200 means the request was accepted.
                         const alreadyPending =
-                            /already\\s+friends|already\\s+sent|pending|duplicate|request\\s+(?:already\\s+)?sent/.test(text);
+                            /already\s+friends|already\s+sent|pending|duplicate|request\s+(?:already\s+)?sent/.test(text);
 
                         if (parsed && (parsed.success === true || Number(parsed.success) === 1)) {
                             state[steamId] = Date.now();
@@ -484,46 +488,29 @@
         });
     }
 
-    async function getSteamAccessToken() {
-        // Steam's authenticated web cookie contains "SteamID||access_token".
-        // It is HttpOnly, so use Tampermonkey's cookie API rather than scraping
-        // page HTML or relying on document.cookie.
-        const readCookie = () => new Promise((resolve, reject) => {
-            try {
-                if (!globalThis.GM_cookie?.list) {
-                    reject(new Error('Tampermonkey cookie access is unavailable. Update Tampermonkey and reload Steam.'));
-                    return;
-                }
-                GM_cookie.list(
-                    { url: 'https://steamcommunity.com/', name: 'steamLoginSecure' },
-                    cookies => {
-                        const cookie = Array.isArray(cookies)
-                            ? cookies.find(item => item?.name === 'steamLoginSecure')
-                            : null;
-                        if (!cookie?.value) {
-                            reject(new Error('Steam login token was not available. Sign in to Steam and reload the Friends page.'));
-                            return;
-                        }
-                        resolve(String(cookie.value));
-                    }
-                );
-            } catch (error) {
-                reject(new Error(error?.message || 'Could not read the Steam login token.'));
-            }
-        });
+    function getSteamApiKey() {
+        return String(readStoredValue(STEAM_API_KEY_STORAGE, '') || '').trim();
+    }
 
-        const rawCookie = await readCookie();
-        let value = rawCookie;
-        try { value = decodeURIComponent(value); } catch {}
-        const separator = value.indexOf('||');
-        if (separator < 0) {
-            throw new Error('Steam login cookie did not contain an access token. Sign in again and retry.');
+    function setupSteamApiKey() {
+        const current = getSteamApiKey();
+        const key = prompt(
+            'Enter your Steam Web API key. You can create or view it at https://steamcommunity.com/dev/apikey\n\n' +
+            'The key stays in this browser and is used only to verify saved local nicknames.',
+            current
+        );
+        if (key === null) return;
+        const value = key.trim();
+        if (!STEAM_API_KEY_PATTERN.test(value)) {
+            setStatus('Invalid Steam Web API key. It should be 32 hexadecimal characters.');
+            alert('That does not look like a valid Steam Web API key.');
+            return;
         }
-        const token = value.slice(separator + 2).trim();
-        if (!token || token.split('.').length < 2) {
-            throw new Error('Steam access token was missing or invalid. Sign in again and retry.');
-        }
-        return token;
+        writeStoredValue(STEAM_API_KEY_STORAGE, value);
+        setStatus('Steam Web API key saved. Testing nickname-list access…');
+        getSteamNicknameList()
+            .then(() => setStatus('Steam nickname verification is ready.'))
+            .catch(error => setStatus(error.message || 'Steam nickname verification test failed.'));
     }
 
     function getAccountIdFromSteamId(steamId) {
@@ -535,11 +522,12 @@
     }
 
     async function getSteamNicknameList() {
-        const accessToken = await getSteamAccessToken();
+        const apiKey = getSteamApiKey();
+        if (!apiKey) throw new Error('Steam nickname verification is not configured. Select “Set Steam API Key” and add your key from https://steamcommunity.com/dev/apikey.');
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'GET',
-                url: `https://api.steampowered.com/IPlayerService/GetNicknameList/v1/?access_token=${encodeURIComponent(accessToken)}`,
+                url: `https://api.steampowered.com/IPlayerService/GetNicknameList/v1/?key=${encodeURIComponent(apiKey)}`,
                 timeout: REQUEST_TIMEOUT_MS,
                 headers: { Accept: 'application/json' },
                 onload: response => {
@@ -684,6 +672,10 @@
             setStatus('Loading Discord sync data…');
             const data = await apiRequest('GET', `${SYNC_API_URL}/client/all-state`);
 
+            if (!getSteamApiKey()) {
+                throw new Error('Before syncing, select “Set Steam API Key” and add your key from https://steamcommunity.com/dev/apikey. Steam requires an API key to retrieve the saved nickname list for verification.');
+            }
+
             const currentSteamId = getSteamId();
             if (!currentSteamId || data.steamId !== currentSteamId) {
                 throw new Error('This sync token is not for the Steam account currently signed in.');
@@ -706,7 +698,7 @@
             // list so newly accepted friends become eligible for nickname sync.
             const needsCoverageCheck =
                 force ||
-                signature !== previous ||
+                signature !== previous.split('\n#coverage:')[0] ||
                 Date.now() - lastFriendCoverageCheckAt >= FRIEND_COVERAGE_RECHECK_MS;
 
             if (!needsCoverageCheck) {
@@ -860,6 +852,10 @@
             return;
         }
 
+        if (!getSteamApiKey()) {
+            setStatus('Set your Steam Web API key before removing nicknames so each removal can be verified.');
+            return;
+        }
         if (!confirm('Remove all local nicknames from your Steam friends? This is an explicit manual action.')) return;
 
         syncRunning = true;
@@ -1018,6 +1014,7 @@
             <div id="discord-steam-sync-body">
                 <button id="discord-steam-sync-button">🔄 Sync All Nicknames</button>
                 <button id="discord-steam-sync-setup">🔐 Set Sync Token</button>
+                <button id="discord-steam-sync-api-key">🔑 Set Steam API Key</button>
                 <button id="discord-steam-sync-gump-prefix">🏷️ Set Gump Prefix</button>
                 <button id="discord-steam-sync-recruit-prefix">🏷️ Set Recruit Prefix</button>
                 <button id="discord-steam-sync-clear-friends">🧹 Remove All Friend Nicknames</button>
@@ -1031,6 +1028,7 @@
         panel.querySelector('#discord-steam-sync-close').addEventListener('click', () => panel.remove());
         panel.querySelector('#discord-steam-sync-button').addEventListener('click', () => syncNicknames(true));
         panel.querySelector('#discord-steam-sync-setup').addEventListener('click', setupToken);
+        panel.querySelector('#discord-steam-sync-api-key').addEventListener('click', setupSteamApiKey);
         panel.querySelector('#discord-steam-sync-gump-prefix').addEventListener('click', () => setupCustomPrefix('Gump'));
         panel.querySelector('#discord-steam-sync-recruit-prefix').addEventListener('click', () => setupCustomPrefix('Recruit'));
         panel.querySelector('#discord-steam-sync-clear-friends').addEventListener('click', clearAllFriendNicknames);
@@ -1080,6 +1078,7 @@
     function registerMenuCommands() {
         const commands = [
             ['Set Discord Steam Sync Token', setupToken],
+            ['Set Steam Web API Key', setupSteamApiKey],
             ['Set Gump Nickname Prefix', () => setupCustomPrefix('Gump')],
             ['Set Recruit Nickname Prefix', () => setupCustomPrefix('Recruit')],
             ['Sync All Nicknames', () => syncNicknames(true)],

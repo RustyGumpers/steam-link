@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.46
+// @version      11.47
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -309,17 +309,20 @@
                 data: body ? JSON.stringify(body) : undefined,
                 onload: response => {
                     clearTimeout(timer);
-                    let data = {};
-                    try { data = JSON.parse(response.responseText || '{}'); }
-                    catch { finish(reject, new Error('Server returned invalid JSON.')); return; }
+                    const rawBody = String(response.responseText || '');
+                    const responseBody = rawBody
+                        .replace(/<[^>]*>/g, ' ')
+                        .replace(/\\s+/g, ' ')
+                        .trim()
+                        .slice(0, 800) || '(empty response body)';
+                    const endpoint = String(url).split('?')[0];
 
+                    // Check HTTP status before parsing: gateways often return HTML/plain-text
+                    // error pages for 401/5xx responses rather than JSON.
                     if (response.status < 200 || response.status >= 300) {
-                        const responseBody = String(response.responseText || '')
-                            .replace(/<[^>]*>/g, ' ')
-                            .replace(/\\s+/g, ' ')
-                            .trim()
-                            .slice(0, 800) || '(empty response body)';
-                        const endpoint = String(url).split('?')[0];
+                        let errorData = {};
+                        try { errorData = JSON.parse(rawBody || '{}'); } catch { /* non-JSON error body */ }
+
                         // Never log request headers or the bearer sync token.
                         console.error('[Discord Steam Sync] Relay API request failed.', {
                             method,
@@ -332,8 +335,18 @@
                             ? 'The Discord/Railway sync API rejected your sync token (HTTP 401). ' +
                               'The token has been kept so you do not have to re-enter it yet. ' +
                               'Relay response: ' + responseBody
-                            : (data.error || `HTTP ${response.status}: ${responseBody}`);
+                            : (errorData.error || `HTTP ${response.status}: ${responseBody}`);
                         finish(reject, new Error(message));
+                        return;
+                    }
+
+                    let data = {};
+                    try { data = JSON.parse(rawBody || '{}'); }
+                    catch {
+                        console.error('[Discord Steam Sync] Relay API returned invalid JSON.', {
+                            method, endpoint, status: response.status, responseBody
+                        });
+                        finish(reject, new Error('The Discord/Railway sync API returned invalid JSON: ' + responseBody));
                         return;
                     }
                     finish(resolve, data);

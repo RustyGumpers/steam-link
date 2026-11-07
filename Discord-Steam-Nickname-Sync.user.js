@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.34
+// @version      11.35
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -200,8 +200,13 @@
             .replace(/[\r\n]+/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-        // Count Unicode code points so a 32-character limit never splits an emoji.
-        return Array.from(normalized).slice(0, MAX_NICKNAME_LENGTH).join('');
+        // Enforce Steam's 32 UTF-16-unit limit without ever splitting a surrogate pair.
+        let result = '';
+        for (const character of normalized) {
+            if (result.length + character.length > MAX_NICKNAME_LENGTH) break;
+            result += character;
+        }
+        return result;
     }
 
     function getSteamId() {

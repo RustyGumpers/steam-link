@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.41
+// @version      11.42
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -63,7 +63,10 @@
         // Sync tokens must never fall back to page-readable localStorage.
         if (key === TOKEN_KEY) {
             try {
-                if (typeof GM_setValue !== 'function') return false;
+                if (typeof GM_setValue !== 'function') {
+                    try { localStorage.removeItem(TOKEN_KEY); } catch {}
+                    return false;
+                }
                 GM_setValue(key, value);
                 try { localStorage.removeItem(key); } catch {}
                 return true;
@@ -106,7 +109,10 @@
         if (!token) return '';
 
         try {
-            if (typeof GM_setValue !== 'function') return '';
+            if (typeof GM_setValue !== 'function') {
+                try { localStorage.removeItem(TOKEN_KEY); } catch {}
+                return '';
+            }
             GM_setValue(TOKEN_KEY, token);
             try { localStorage.removeItem(TOKEN_KEY); } catch {}
             return token;

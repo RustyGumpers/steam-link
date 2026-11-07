@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.47
+// @version      11.48
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -1108,17 +1108,17 @@
         #discord-steam-sync-panel button:not(#discord-steam-sync-close){width:100%!important;margin:0 0 8px!important;padding:9px 10px!important;border:0!important;border-radius:3px!important;background:#2878c8!important;color:#ffffff!important;font-weight:700!important;cursor:pointer!important;box-sizing:border-box!important}
         #discord-steam-sync-panel button:not(#discord-steam-sync-close):hover{filter:brightness(1.08)!important}
         /* Primary action: green */
-        #discord-steam-sync-button{background:#58A864!important;color:#ffffff!important}
+        #discord-steam-sync-panel button#discord-steam-sync-button{background-color:#58A864!important;color:#ffffff!important}
         /* Setup/configuration actions: blue */
-        #discord-steam-sync-setup,
-        #discord-steam-sync-api-key,
-        #discord-steam-sync-gump-prefix,
-        #discord-steam-sync-recruit-prefix{background:#2878c8!important;color:#ffffff!important}
+        #discord-steam-sync-panel button#discord-steam-sync-setup,
+        #discord-steam-sync-panel button#discord-steam-sync-api-key,
+        #discord-steam-sync-panel button#discord-steam-sync-gump-prefix,
+        #discord-steam-sync-panel button#discord-steam-sync-recruit-prefix{background-color:#2878c8!important;color:#ffffff!important}
         /* Destructive actions: red */
-        #discord-steam-sync-remove-api-key,
-        #discord-steam-sync-clear-friends{background:#c43d3d!important;color:#ffffff!important}
+        #discord-steam-sync-panel button#discord-steam-sync-remove-api-key,
+        #discord-steam-sync-panel button#discord-steam-sync-clear-friends{background-color:#c43d3d!important;color:#ffffff!important}
         /* Stop action: yellow */
-        #discord-steam-sync-stop{background:#e6b83f!important;color:#222222!important}
+        #discord-steam-sync-panel button#discord-steam-sync-stop{background-color:#e6b83f!important;color:#222222!important}
         #discord-steam-sync-panel button:disabled{opacity:.5!important;cursor:not-allowed!important}
         #discord-steam-sync-status{margin-top:4px!important;line-height:1.35!important;min-height:38px!important;color:#d7d7d7!important}
         #discord-steam-sync-progress{margin-top:5px!important;color:#8f98a0!important;font-size:12px!important}

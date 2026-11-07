@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.33
+// @version      11.34
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -69,6 +69,7 @@
                 try { localStorage.removeItem(key); } catch {}
                 return true;
             } catch {
+                try { localStorage.removeItem(TOKEN_KEY); } catch {}
                 return false;
             }
         }
@@ -111,6 +112,7 @@
             try { localStorage.removeItem(TOKEN_KEY); } catch {}
             return token;
         } catch {
+            try { localStorage.removeItem(TOKEN_KEY); } catch {}
             return '';
         }
     }
@@ -823,7 +825,16 @@
             const currentSteamId = getSteamId();
             if (!currentSteamId || data.steamId !== currentSteamId) throw new Error('This sync token is not for the Steam account currently signed in.');
             if (data.ok !== true || data.complete !== true || !Array.isArray(data.states)) throw new Error('Sync data is incomplete. No nicknames were changed.');
-            if (Number(data.memberCount || 0) > 0 && Number(data.fetchedMemberCount || data.memberCount) < Number(data.memberCount)) throw new Error('Discord member data is incomplete. No nicknames were changed.');
+            const memberCount = Number(data.memberCount);
+            const fetchedMemberCount = Number(data.fetchedMemberCount);
+            if (
+                !Number.isFinite(memberCount) ||
+                !Number.isFinite(fetchedMemberCount) ||
+                memberCount < 0 ||
+                fetchedMemberCount < memberCount
+            ) {
+                throw new Error('Discord member data is incomplete or its coverage counts are invalid. No nicknames were changed.');
+            }
             const signature = stateSignature(data.states);
             const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
             const needsCheck = force || signature !== previous.split('\n#coverage:')[0] || Date.now() - lastFriendCoverageCheckAt >= FRIEND_COVERAGE_RECHECK_MS;

@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.43
+// @version      11.44
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -36,7 +36,7 @@
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
     const POLL_INTERVAL_MS = 15000;
-    const FRIEND_COVERAGE_RECHECK_MS = 60000;
+    const FRIEND_COVERAGE_RECHECK_MS = 5 * 60 * 1000;
     const REQUEST_TIMEOUT_MS = 15000;
     const NICKNAME_VERIFY_DELAY_MS = 1500;
     const STEAM_API_KEY_PATTERN = /^[a-f0-9]{32}$/i;
@@ -934,7 +934,10 @@
                     if (result === 'sent') requestsSent++;
                     else if (result === 'pending') requestPending++;
                     else if (result === 'throttled') requestCooldown++;
-                } catch { requestFailed++; }
+                } catch (error) {
+                    requestFailed++;
+                    console.warn('[Discord Steam Sync] Friend request failed:', id, error?.message || error);
+                }
                 await sleep(500);
             }
 
@@ -943,6 +946,9 @@
             verifiedPrefixes = result.verified.filter(item => item.type === 'prefix').length;
             verifiedRemovals = result.verified.filter(item => item.type === 'removal').length;
             failed = result.failed.length;
+            for (const item of result.failed) {
+                console.warn('[Discord Steam Sync] Nickname change not verified:', item.steamId, item.message);
+            }
             if (failed === 0 && notFriends === 0 && requestFailed === 0) writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, completionSignature);
             else removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
             const verified = verifiedPrefixes + verifiedRemovals;
@@ -966,6 +972,9 @@
             writeStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '1');
             const changes = [...friends.keys()].map(steamId => ({ steamId, nickname: '', type: 'removal' }));
             const result = await applyAndVerifyNicknameBatch(changes, 'Removing friend nicknames…');
+            for (const item of result.failed) {
+                console.warn('[Discord Steam Sync] Remove All nickname not verified:', item.steamId, item.message);
+            }
             removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
             setStatus(result.failed.length ? 'Remove All finished with items needing attention. Automatic sync is paused.' : 'All friend nickname removals verified. Automatic sync is paused.',
                 result.verified.length + ' nickname removals verified; ' + result.failed.length + ' failed or unverified across ' + friends.size + ' Steam friends. Select “Sync All Nicknames” when you want to restore role prefixes.');

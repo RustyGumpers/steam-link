@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.42
+// @version      11.43
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -483,10 +483,20 @@
             if (!Array.isArray(players)) {
                 throw new Error('Steam did not return readable profile names for the complete friends list. No nickname changes were made.');
             }
+            const requestedIds = new Set(batch);
+            const receivedIds = new Set();
             for (const player of players) {
                 const id = String(player?.steamid || '').trim();
                 const personaName = trimNickname(player?.personaname || '');
-                if (/^\d{17}$/.test(id) && personaName) friends.set(id, { personaName });
+                if (!requestedIds.has(id) || receivedIds.has(id) || !personaName) {
+                    throw new Error('Steam returned an unexpected, duplicate, or incomplete profile record. No nickname changes were made.');
+                }
+                receivedIds.add(id);
+                friends.set(id, { personaName });
+            }
+            const missingBatchIds = batch.filter(id => !receivedIds.has(id));
+            if (missingBatchIds.length) {
+                throw new Error('Steam did not return every requested friend profile. No nickname changes were made. Missing SteamIDs: ' + missingBatchIds.slice(0, 10).join(', ') + (missingBatchIds.length > 10 ? ', …' : ''));
             }
             await sleep(150);
         }

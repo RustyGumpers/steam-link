@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.39
+// @version      11.40
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -757,7 +757,7 @@
     async function applyAndVerifyNicknameBatch(changes, progressLabel) {
         const seenIds = new Set();
         for (const change of changes) {
-            if (!/^\\d{17}$/.test(String(change?.steamId || '')) || seenIds.has(change.steamId)) {
+            if (!/^\d{17}$/.test(String(change?.steamId || '')) || seenIds.has(change.steamId)) {
                 throw new Error('Nickname batch contains an invalid or duplicate SteamID. No nickname changes were submitted.');
             }
             seenIds.add(change.steamId);
@@ -834,16 +834,15 @@
     }
 
     function stateSignature(states) {
-        return states
+        const normalized = states
             .map(item => ({
                 steamId: getStateSteamId(item),
                 nickname: getStateNickname(item),
                 role: String(item?.role || '').trim()
             }))
             .filter(item => item.steamId && item.nickname)
-            .sort((a, b) => a.steamId.localeCompare(b.steamId))
-            .map(item => `${item.steamId}|${item.role}|${item.nickname}`)
-            .join('\n');
+            .sort((a, b) => a.steamId.localeCompare(b.steamId));
+        return JSON.stringify(normalized.map(item => [item.steamId, item.role, item.nickname]));
     }
 
     async function syncNicknames(force = false) {
@@ -901,7 +900,7 @@
             ].sort((a, b) => a.steamId.localeCompare(b.steamId));
 
             const expected = JSON.stringify(expectedChanges.map(change => [change.steamId, change.type, change.nickname]));
-            const completionSignature = signature + '\\n#coverage:' + coverage + '\\n#nicknames:' + expected;
+            const completionSignature = signature + '\n#coverage:' + coverage + '\n#nicknames:' + expected;
             const needsNicknameChanges = expectedChanges.some(change =>
                 getSavedNicknameForSteamId(savedNicknames, change.steamId) !== change.nickname
             );

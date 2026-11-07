@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.13
+// @version      11.14
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -435,25 +435,17 @@
                             parsed = JSON.parse(String(response.responseText || ''));
                         } catch {}
 
-                        // Prefer structured Steam responses when available.
-                        // Do not search the raw JSON for words such as "error"
-                        // because a successful response may legitimately contain
-                        // an error field with a null/empty value.
-                        if (parsed && (parsed.success === false || parsed.success === 0)) {
-                            reject(new Error(`Steam friend request was rejected for ${steamId}.`));
-                            return;
-                        }
+                        // Steam's endpoint normally returns JSON. Treat explicit
+                        // non-success codes as failures instead of assuming that
+                        // any HTTP 200 means the request was accepted.
+                        const alreadyPending =
+                            /already\\s+friends|already\\s+sent|pending|duplicate|request\\s+(?:already\\s+)?sent/.test(text);
 
-                        if (parsed && (parsed.success === true || parsed.success === 1)) {
+                        if (parsed && (parsed.success === true || Number(parsed.success) === 1)) {
                             state[steamId] = Date.now();
                             writeFriendRequestState(state);
                             return resolve('sent');
                         }
-
-                        const alreadyPending =
-                            /already\s+friends|already\s+sent|pending|duplicate|request\s+(?:already\s+)?sent/.test(text);
-                        const explicitFailure =
-                            /failed|failure|denied|blocked|limited|error/.test(text);
 
                         if (alreadyPending) {
                             state[steamId] = Date.now();
@@ -461,17 +453,17 @@
                             return resolve('pending');
                         }
 
-                        if (explicitFailure) {
+                        if (
+                            !parsed ||
+                            (Object.prototype.hasOwnProperty.call(parsed, 'success')) ||
+                            (parsed.error && String(parsed.error).trim())
+                        ) {
                             reject(new Error(`Steam friend request was rejected for ${steamId}.`));
                             return;
                         }
 
-                        // A successful HTTP response without a structured result
-                        // is treated as sent; the 24-hour cooldown still prevents
-                        // repeated requests.
-                        state[steamId] = Date.now();
-                        writeFriendRequestState(state);
-                        return resolve('sent');
+                        reject(new Error(`Steam returned an unrecognized friend-request response for ${steamId}.`));
+                        return;
                     }
 
                     if (/already\s+friends|already\s+sent|pending|duplicate/.test(text)) {

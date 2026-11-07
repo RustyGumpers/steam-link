@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.12
+// @version      11.13
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -331,7 +331,7 @@
         // fallback for layouts where the visible name element is unavailable.
         const dataSearch = String(block.getAttribute?.('data-search') || '');
         if (dataSearch) {
-            const searchName = trimNickname(dataSearch.split(/s*;s*/)[0] || '');
+            const searchName = trimNickname(dataSearch.split(/\s*;\s*/)[0] || '');
             if (searchName) return searchName;
         }
 
@@ -424,6 +424,7 @@
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: 'https://steamcommunity.com/actions/AddFriendAjax',
+                timeout: REQUEST_TIMEOUT_MS,
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
                 data: `sessionID=${encodeURIComponent(sessionID)}&steamid=${encodeURIComponent(steamId)}&accept_invite=0`,
                 onload: response => {
@@ -481,7 +482,8 @@
 
                     reject(new Error(`Steam friend request failed for ${steamId}.`));
                 },
-                onerror: () => reject(new Error(`Steam friend request failed for ${steamId}.`))
+                onerror: () => reject(new Error(`Steam friend request failed for ${steamId}.`)),
+                ontimeout: () => reject(new Error(`Steam friend request timed out for ${steamId}.`))
             });
         });
     }
@@ -494,6 +496,7 @@
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: `https://steamcommunity.com/profiles/${steamId}/ajaxsetnickname/`,
+                timeout: REQUEST_TIMEOUT_MS,
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
                 data: `nickname=${encodeURIComponent(trimNickname(nickname))}&sessionid=${encodeURIComponent(sessionID)}`,
                 onload: response => {
@@ -517,7 +520,8 @@
 
                     resolve();
                 },
-                onerror: () => reject(new Error(`Steam nickname update failed for ${steamId}.`))
+                onerror: () => reject(new Error(`Steam nickname update failed for ${steamId}.`)),
+                ontimeout: () => reject(new Error(`Steam nickname update timed out for ${steamId}.`))
             });
         });
     }
@@ -674,9 +678,20 @@
             const totalEntries = entries.length + clearEntries.length;
 
             if (totalEntries === 0) {
-                throw new Error(
-                    `No matching Steam friends to update. Steam found ${friends.size} friend(s), but none of the ${desired.size + clearStates.size} Discord-linked Steam IDs matched.`
-                );
+                // A valid roster can contain only users who have not accepted
+                // the Steam friend request yet. That is a waiting state, not a
+                // sync failure: preserve the coverage signature so the periodic
+                // friend-list check can detect when one becomes a friend.
+                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, completionSignature);
+                if (desired.size + clearStates.size === 0) {
+                    setStatus('No linked Discord accounts need nickname changes.');
+                } else {
+                    setStatus(
+                        'Waiting for linked members to become Steam friends.',
+                        `Steam found ${friends.size} friend(s); ${missing.length} linked member(s) are not friends yet. Their nicknames will sync after they accept.`
+                    );
+                }
+                return;
             }
 
             for (const [steamId, state] of entries) {

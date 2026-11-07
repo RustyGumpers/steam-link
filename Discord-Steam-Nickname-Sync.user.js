@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.40
+// @version      11.41
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -968,6 +968,12 @@
         if (value === null) return;
 
         const prefix = trimNickname(value);
+        if (prefix.length > 24) {
+            const warning = 'Custom prefixes must be 24 characters or fewer so the Steam display name remains visible.';
+            setStatus(warning);
+            alert(warning);
+            return;
+        }
         const otherPrefix = getEffectivePrefix(otherRole);
         const proposedPrefix = getEffectivePrefix(role, prefix);
 

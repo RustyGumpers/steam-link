@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.31
+// @version      11.32
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -32,7 +32,7 @@
     const LEGACY_CUSTOM_PREFIX_KEY = 'discordSteamSyncCustomPrefixV1';
     const MANAGED_PREFIXES_KEY = 'discordSteamSyncManagedPrefixesV1';
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV10';
-    const RESYNC_AFTER_CLEAR_KEY = 'discordSteamSyncResyncAfterClearV1';
+    const AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY = 'discordSteamSyncAutoSyncPausedAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
     const POLL_INTERVAL_MS = 15000;
@@ -779,6 +779,7 @@
         if (syncRunning) return;
         if (!getToken()) { setStatus('No sync token configured.'); return; }
         if (!isFriendsPage()) { setStatus('Open Steam → Friends to run nickname sync.'); return; }
+        if (force) removeStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY);
         syncRunning = true;
         stopRequested = false;
         setButtonDisabled(true);
@@ -875,6 +876,7 @@
             if (!currentSteamId) throw new Error('Could not determine your Steam ID. Open Steam → Friends and try again.');
             const friends = await scanFriends();
             friends.delete(currentSteamId);
+            writeStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '1');
             let completed = 0, failed = 0;
             for (const steamId of friends.keys()) {
                 if (stopRequested) throw new Error('Sync stopped.');
@@ -883,8 +885,8 @@
                 await sleep(500);
             }
             removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
-            setStatus(failed ? 'Remove All finished with items needing attention.' : 'All friend nickname removals verified.',
-                (completed - failed) + ' nickname removals verified; ' + failed + ' not verified across ' + friends.size + ' Steam friends.');
+            setStatus(failed ? 'Remove All finished with items needing attention. Automatic sync is paused.' : 'All friend nickname removals verified. Automatic sync is paused.',
+                (completed - failed) + ' nickname removals verified; ' + failed + ' not verified across ' + friends.size + ' Steam friends. Select “Sync All Nicknames” when you want to restore role prefixes.');
         } catch (error) { setStatus(error.message || 'Could not remove friend nicknames.'); }
         finally { syncRunning = false; setButtonDisabled(false); }
     }
@@ -1035,9 +1037,11 @@
 
         const hasToken = Boolean(getToken());
         const hasApiKey = Boolean(getSteamApiKey());
+        const autoSyncPaused = String(readStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '') || '') === '1';
         setStatus(
             !hasToken ? 'Sync token required.' :
             !hasApiKey ? 'Steam API key required.' :
+            autoSyncPaused ? 'Automatic sync paused after Remove All. Select Sync All Nicknames to resume.' :
             (isFriendsPage() ? 'Ready.' : 'Open Steam → Friends to sync.')
         );
 
@@ -1072,6 +1076,7 @@
         clearInterval(pollTimer);
         pollTimer = setInterval(() => {
             if (document.hidden || !getToken() || !isFriendsPage() || syncRunning) return;
+            if (String(readStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '') || '') === '1') return;
             syncNicknames(false).catch(() => {});
         }, POLL_INTERVAL_MS);
     }
@@ -1102,15 +1107,10 @@
 
     setTimeout(() => {
         if (!getToken() || !isFriendsPage()) return;
-
-        const resyncAfterClear = String(readStoredValue(RESYNC_AFTER_CLEAR_KEY, '') || '') === '1';
-        if (resyncAfterClear) {
-            removeStoredValue(RESYNC_AFTER_CLEAR_KEY);
-            setStatus('Restoring Discord nicknames after Remove All…');
-            syncNicknames(true).catch(() => {});
+        if (String(readStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '') || '') === '1') {
+            setStatus('Automatic sync is paused after Remove All. Select “Sync All Nicknames” to resume.');
             return;
         }
-
         syncNicknames(false).catch(() => {});
     }, 2500);
 })();

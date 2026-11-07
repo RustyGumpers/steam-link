@@ -780,12 +780,6 @@
 
             const friends = await scanFriends();
             const coverageSignature = friendCoverageSignature(data.states, friends);
-            const completionSignature = `${signature}\n#coverage:${coverageSignature}`;
-
-            if (!force && completionSignature === previous) {
-                setStatus('Already synchronized.');
-                return;
-            }
             const stateBySteamId = new Map();
             for (const state of data.states) {
                 const steamId = getStateSteamId(state);
@@ -810,6 +804,29 @@
                 } else {
                     clearStates.set(steamId, state);
                 }
+            }
+
+            // Include the current Steam persona names and calculated target
+            // nicknames in the signature. This detects Steam display-name
+            // changes even when Discord roles and linked IDs remain unchanged.
+            const expectedNicknameSignature = [
+                ...[...desired.entries()]
+                    .filter(([steamId]) => friends.has(steamId))
+                    .map(([steamId, state]) => `${steamId}:${buildSteamNickname(state, friends.get(steamId))}`),
+                ...[...clearStates.keys()]
+                    .filter(steamId => friends.has(steamId))
+                    .map(steamId => {
+                        const steamName = getSteamDisplayName(friends.get(steamId));
+                        if (!steamName) throw new Error('Could not read a Steam display name for one of the friends being cleared.');
+                        return `${steamId}:${steamName}`;
+                    })
+            ].sort().join('|');
+            const completionSignature =
+                `${signature}\n#coverage:${coverageSignature}\n#nicknames:${expectedNicknameSignature}`;
+
+            if (!force && completionSignature === previous) {
+                setStatus('Already synchronized.');
+                return;
             }
 
             const matching = [...desired.keys()]

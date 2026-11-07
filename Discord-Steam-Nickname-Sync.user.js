@@ -248,45 +248,69 @@
     }
 
     function getFriendBlocks() {
-        const friends = new Map();
-
-        // Steam has used several different friend-list DOM structures.
-        // Do not require a particular friend-block class; collect every valid
-        // 17-digit Steam ID exposed by the current Friends page.
-        for (const node of document.querySelectorAll('[data-steamid]')) {
-            const steamId = String(node.getAttribute('data-steamid') || '').trim();
-            if (/^\d{17}$/.test(steamId)) {
-                const block = node.closest('.friend_block_v2, .friend_block')
-                    || node.closest('.friend_block_content')
-                    || node;
-                friends.set(steamId, block);
+        const rootSelectors = [
+            '#friends_list',
+            '#friends_list_container',
+            '#friends_list_wrapper',
+            '.friendslist_list',
+            '#friend_area'
+        ];
+        let root = null;
+        for (const selector of rootSelectors) {
+            const candidate = document.querySelector(selector);
+            if (candidate && candidate.querySelector('.friend_block_v2, .friend_block')) {
+                root = candidate;
+                break;
             }
         }
 
-        // Also collect IDs from profile links in case Steam does not expose
-        // data-steamid on the friend container.
-        for (const link of document.querySelectorAll('a[href*="/profiles/"]')) {
-            // Read the raw HTML href instead of link.href. Firefox can resolve
-            // malformed/relative Steam links into a file:/// URL before the
-            // script ever gets to the regex, which can abort friend scanning.
-            const rawHref = String(link.getAttribute('href') || '').trim();
+        // Fail closed rather than treating arbitrary profile links elsewhere
+        // on Steam as friends. This protects against false nickname updates
+        // and unwanted friend requests.
+        if (!root) {
+            return { friends: new Map(), complete: false, reason: 'Steam friend-list container was not found.' };
+        }
 
-            const match = rawHref.match(
-                /(?:https?:\/\/steamcommunity\.com)?\/profiles\/(\d{17})(?:[/?#]|$)/
-            );
+        const friends = new Map();
+        const blocks = [...root.querySelectorAll('.friend_block_v2, .friend_block')];
+        let invalidBlocks = 0;
 
-            if (!match) continue;
+        for (const block of blocks) {
+            let steamId = String(
+                block.getAttribute('data-steamid') ||
+                block.querySelector('[data-steamid]')?.getAttribute('data-steamid') ||
+                ''
+            ).trim();
 
-            const steamId = match[1];
-            const block =
-                link.closest('.friend_block_v2, .friend_block, [data-steamid]')
-                || link.closest('.friend_block_content')
-                || link;
+            if (!/^\d{17}$/.test(steamId)) {
+                const links = block.querySelectorAll('a[href*="/profiles/"]');
+                for (const link of links) {
+                    const rawHref = String(link.getAttribute('href') || '').trim();
+                    const match = rawHref.match(
+                        /(?:https?:\/\/steamcommunity\.com)?\/profiles\/(\d{17})(?:[/?#]|$)/
+                    );
+                    if (match) {
+                        steamId = match[1];
+                        break;
+                    }
+                }
+            }
+
+            if (!/^\d{17}$/.test(steamId)) {
+                invalidBlocks++;
+                continue;
+            }
 
             friends.set(steamId, block);
         }
 
-        return friends;
+        const complete = invalidBlocks === 0 && friends.size === blocks.length;
+        return {
+            friends,
+            complete,
+            reason: complete ? '' : `Found ${invalidBlocks} friend entry/entries without a valid SteamID.`,
+            blockCount: blocks.length
+        };
     }
 
     function getStateSteamId(state) {
@@ -364,48 +388,44 @@
     }
 
     async function scanFriends() {
-        let bestFriends = new Map();
+        let bestSnapshot = { friends: new Map(), complete: false, reason: 'Friend list has not loaded.' };
         let stableScans = 0;
-        let previousSignature = '';
+        let previousSignature = null;
 
         for (let attempt = 1; attempt <= AUTO_SCAN_RETRIES; attempt++) {
             if (stopRequested) throw new Error('Sync stopped.');
 
-            const friends = getFriendBlocks();
+            const snapshot = getFriendBlocks();
+            const signature = [...snapshot.friends.keys()].sort().join('|');
 
-            // Keep the latest snapshot when its size is equal or larger; the
-            // IDs can change while the total count stays the same.
-            if (friends.size >= bestFriends.size) bestFriends = friends;
+            if (snapshot.friends.size >= bestSnapshot.friends.size) bestSnapshot = snapshot;
 
-            const scanSignature = [...friends.keys()].sort().join('|');
-            if (scanSignature && scanSignature === previousSignature) {
+            if (snapshot.complete && signature === previousSignature) {
                 stableScans++;
             } else {
                 stableScans = 0;
             }
-            previousSignature = scanSignature;
+            previousSignature = signature;
 
-            // Steam can populate the Friends page incrementally. Require two
-            // consecutive scans with the same SteamID set before treating
-            // the current DOM snapshot as ready.
-            if (bestFriends.size > 0 && stableScans >= 1) {
+            // Require a recognized Steam list container, valid IDs for every
+            // rendered friend block, and two consecutive identical snapshots.
+            // Empty lists are allowed only when the recognized container exists.
+            if (snapshot.complete && stableScans >= 1) {
                 lastFriendCoverageCheckAt = Date.now();
-                return friends;
+                return snapshot.friends;
             }
 
             setStatus(
-                'Waiting for Steam friends to finish loading…',
-                `Scan ${attempt}/${AUTO_SCAN_RETRIES} — found ${bestFriends.size} friend(s)`
+                'Checking Steam friend list…',
+                `Scan ${attempt}/${AUTO_SCAN_RETRIES} — found ${snapshot.friends.size} friend(s)${snapshot.reason ? ' — ' + snapshot.reason : ''}`
             );
             await sleep(AUTO_SCAN_RETRY_DELAY_MS);
         }
 
-        if (bestFriends.size > 0) {
-            lastFriendCoverageCheckAt = Date.now();
-            return bestFriends;
-        }
-
-        throw new Error('Steam friend list could not be read. Make sure the Friends page is open and loaded.');
+        throw new Error(
+            'Could not verify a complete, stable Steam friend-list snapshot. No nickname changes or automatic friend requests were made. ' +
+            (bestSnapshot.reason || 'Reload the Friends page and try again.')
+        );
     }
 
     function readFriendRequestState() {
@@ -932,6 +952,7 @@
 
             let completed = 0;
             let failed = 0;
+            const failedSteamIds = [];
             for (const steamId of friends.keys()) {
                 if (stopRequested) throw new Error('Sync stopped.');
                 completed++;
@@ -943,15 +964,27 @@
                     await setSteamNickname(steamId, '');
                 } catch (error) {
                     failed++;
+                    failedSteamIds.push(steamId);
                 }
                 await sleep(500);
             }
+
+            // Invalidate the old signature after any partial clear so the next
+            // manual/automatic sync reconciles successful changes as well.
             removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
+
+            if (failed) {
+                setStatus(
+                    `Removed nicknames from ${friends.size - failed} friend(s); ${failed} failed.`,
+                    `Failed SteamIDs: ${failedSteamIds.join(', ')}. No reload was performed so the failure report remains visible. Run Sync All Nicknames after reviewing.`
+                );
+                return;
+            }
+
             writeStoredValue(RESYNC_AFTER_CLEAR_KEY, '1');
-            const successCount = friends.size - failed;
             setStatus(
-                `Removed local nicknames from ${successCount} friend(s).${failed ? ` ${failed} friend(s) could not be updated.` : ''}`,
-                'The page will automatically refresh and restore the Discord nicknames.'
+                `Removed local nicknames from all ${friends.size} scanned friend(s).`,
+                'The page will refresh and restore Discord nicknames.'
             );
             await sleep(2500);
             location.reload();

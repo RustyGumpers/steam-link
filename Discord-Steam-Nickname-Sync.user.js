@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.51
+// @version      11.52
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -996,6 +996,79 @@
             syncRunning = false;
             setButtonDisabled(false);
             console.log('[Discord Steam Sync] syncNicknames finished.', { syncRunning });
+        }
+    }
+
+
+    async function clearAllFriendNicknames() {
+        if (syncRunning) {
+            setStatus('A sync is already running. Wait for it to finish before removing nicknames.');
+            return;
+        }
+        if (!isFriendsPage()) {
+            setStatus('Open Steam → Friends before removing friend nicknames.');
+            return;
+        }
+        if (!getSteamApiKey()) {
+            setStatus('Set your Steam API key before removing friend nicknames.');
+            return;
+        }
+
+        const friendCount = 'your Steam friends';
+        if (!confirm(
+            'Remove all local nicknames from your Steam friends?\\n\\n' +
+            'This resets each friend’s local nickname to their normal Steam display name. ' +
+            'It does not remove friends or change their public Steam names.'
+        )) return;
+
+        syncRunning = true;
+        stopRequested = false;
+        setButtonDisabled(true);
+        writeStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '1');
+        removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
+
+        let accepted = 0;
+        let failed = 0;
+        let skipped = 0;
+        try {
+            setStatus('Loading your complete Steam friends list…');
+            const friends = await scanFriends();
+            const changes = [];
+            for (const [steamId, block] of friends) {
+                if (stopRequested) throw new Error('Removal stopped.');
+                const personaName = getSteamDisplayName(block);
+                if (!personaName) {
+                    skipped++;
+                    continue;
+                }
+                changes.push({ steamId, nickname: personaName, type: 'removal' });
+            }
+
+            if (changes.length === 0) {
+                writeStoredValue(MANAGED_NICKNAMES_KEY, '{}');
+                setStatus('No Steam friends were found.', 'Automatic syncing remains paused. Select Sync All Nicknames when you want to resume.');
+                return;
+            }
+
+            const result = await applyNicknameBatch(changes, 'Removing local nicknames…');
+            accepted = result.accepted.length;
+            failed = result.failed.length + skipped;
+
+            const remainingManaged = readManagedNicknames();
+            for (const item of result.accepted) delete remainingManaged[item.steamId];
+            writeStoredValue(MANAGED_NICKNAMES_KEY, JSON.stringify(remainingManaged));
+
+            setStatus(
+                failed > 0 ? 'Nickname removal finished with items needing attention.' : 'All friend nickname removals were submitted successfully.',
+                accepted + ' nickname resets accepted by Steam; ' + failed +
+                ' failures or skipped friends. Changes are not independently verified. Automatic syncing is paused; select Sync All Nicknames to resume.'
+            );
+        } catch (error) {
+            console.error('[Discord Steam Sync] clearAllFriendNicknames failed.', error);
+            setStatus(error.message || 'Could not remove friend nicknames. Automatic syncing remains paused.');
+        } finally {
+            syncRunning = false;
+            setButtonDisabled(false);
         }
     }
 

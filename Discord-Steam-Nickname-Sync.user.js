@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.50
+// @version      11.51
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -802,7 +802,7 @@
     async function applyNicknameBatch(changes, progressLabel) {
         const seenIds = new Set();
         for (const change of changes) {
-            if (!/^\\d{17}$/.test(String(change?.steamId || '')) || seenIds.has(change.steamId)) {
+            if (!/^\d{17}$/.test(String(change?.steamId || '')) || seenIds.has(change.steamId)) {
                 throw new Error('Nickname batch contains an invalid or duplicate SteamID. No nickname changes were submitted.');
             }
             seenIds.add(change.steamId);
@@ -889,7 +889,7 @@
 
             const signature = stateSignature(data.states);
             const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
-            const needsCheck = force || signature !== previous.split('\\n#coverage:')[0] || Date.now() - lastFriendCoverageCheckAt >= FRIEND_COVERAGE_RECHECK_MS;
+            const needsCheck = force || signature !== previous.split('\n#coverage:')[0] || Date.now() - lastFriendCoverageCheckAt >= FRIEND_COVERAGE_RECHECK_MS;
             if (!needsCheck) { setStatus('Already synchronized.'); return; }
 
             setStatus('Retrieving your complete Steam friends list…');
@@ -931,7 +931,7 @@
             changes.sort((a, b) => a.steamId.localeCompare(b.steamId));
 
             const expected = JSON.stringify(changes.map(change => [change.steamId, change.type, change.nickname]));
-            const completionSignature = signature + '\\n#coverage:' + coverage + '\\n#changes:' + expected;
+            const completionSignature = signature + '\n#coverage:' + coverage + '\\n#changes:' + expected;
             if (!force && completionSignature === previous && changes.length === 0) {
                 setStatus('Already synchronized.');
                 return;
@@ -969,7 +969,7 @@
             writeStoredValue(MANAGED_NICKNAMES_KEY, JSON.stringify(managed));
             failed = result.failed.length;
             if (failed === 0 && notFriends === 0 && requestFailed === 0) {
-                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature + '\\n#coverage:' + coverage);
+                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature + '\n#coverage:' + coverage);
             } else {
                 removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
             }

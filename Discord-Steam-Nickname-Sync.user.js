@@ -930,13 +930,6 @@
             }
             changes.sort((a, b) => a.steamId.localeCompare(b.steamId));
 
-            const expected = JSON.stringify(changes.map(change => [change.steamId, change.type, change.nickname]));
-            const completionSignature = signature + '\n#coverage:' + coverage + '\\n#changes:' + expected;
-            if (!force && completionSignature === previous && changes.length === 0) {
-                setStatus('Already synchronized.');
-                return;
-            }
-
             notFriends = [...desired.keys()].filter(id => !friends.has(id)).length;
             for (const [id] of desired) {
                 if (friends.has(id)) continue;
@@ -951,6 +944,19 @@
                     console.warn('[Discord Steam Sync] Friend request failed:', id, error?.message || error);
                 }
                 await sleep(350);
+            }
+
+            if (changes.length === 0) {
+                if (notFriends === 0 && requestFailed === 0) {
+                    writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature + '\n#coverage:' + coverage);
+                } else {
+                    removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
+                }
+                setStatus(notFriends > 0 || requestFailed > 0 ? 'Sync finished with items needing attention.' : 'Already up to date.',
+                    'No nickname updates were needed; ' + notFriends + ' linked members are not Steam friends; ' +
+                    requestsSent + ' friend requests sent; ' + requestPending + ' already pending; ' +
+                    requestCooldown + ' on 24-hour cooldown; ' + requestFailed + ' request failures.');
+                return;
             }
 
             console.log('[Discord Steam Sync] Submitting nickname changes without independent read-back verification.', {

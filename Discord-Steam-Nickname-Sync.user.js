@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.49
+// @version      11.50
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -1287,3 +1287,73 @@
             autoSyncPaused ? 'Automatic sync paused after Remove All. Select Sync All Nicknames to resume.' :
             (isFriendsPage() ? 'Ready.' : 'Open Steam → Friends to sync.')
         );
+
+        if (!hasToken) {
+            setTimeout(() => {
+                if (!getToken()) setupToken();
+            }, 500);
+        }
+
+        return true;
+    }
+
+    function ensureUI() {
+        if (uiDismissed || document.querySelector('#discord-steam-sync-panel')) return;
+        if (buildUI()) return;
+
+        clearTimeout(uiRetryTimer);
+        uiRetryTimer = setTimeout(ensureUI, 250);
+    }
+
+    function startUIObserver() {
+        ensureUI();
+
+        if (uiObserver || !document.documentElement) return;
+        uiObserver = new MutationObserver(() => {
+            if (!uiDismissed && !document.querySelector('#discord-steam-sync-panel')) ensureUI();
+        });
+        uiObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
+
+    function startPolling() {
+        clearInterval(pollTimer);
+        pollTimer = setInterval(() => {
+            if (document.hidden || !getToken() || !isFriendsPage() || syncRunning) return;
+            if (String(readStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '') || '') === '1') return;
+            syncNicknames(false).catch(() => {});
+        }, POLL_INTERVAL_MS);
+    }
+
+    function registerMenuCommands() {
+        const commands = [
+            ['Set Discord Steam Sync Token', setupToken],
+            ['Set Steam Web API Key', setupSteamApiKey],
+            ['Set Gump Nickname Prefix', () => setupCustomPrefix('Gump')],
+            ['Set Recruit Nickname Prefix', () => setupCustomPrefix('Recruit')],
+            ['Sync All Nicknames', () => syncNicknames(true)],
+            ['Remove All Friend Nicknames', clearAllFriendNicknames]
+        ];
+
+        for (const [name, callback] of commands) {
+            try {
+                if (typeof GM_registerMenuCommand === 'function') {
+                    GM_registerMenuCommand(name, callback);
+                }
+            } catch {}
+        }
+    }
+
+    migrateLegacyPrefix();
+    registerMenuCommands();
+    startUIObserver();
+    startPolling();
+
+    setTimeout(() => {
+        if (!getToken() || !isFriendsPage()) return;
+        if (String(readStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '') || '') === '1') {
+            setStatus('Automatic sync is paused after Remove All. Select “Sync All Nicknames” to resume.');
+            return;
+        }
+        syncNicknames(false).catch(() => {});
+    }, 2500);
+})();

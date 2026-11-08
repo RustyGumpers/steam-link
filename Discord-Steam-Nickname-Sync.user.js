@@ -31,6 +31,7 @@
     const RECRUIT_CUSTOM_PREFIX_KEY = 'discordSteamSyncRecruitPrefixV1';
     const LEGACY_CUSTOM_PREFIX_KEY = 'discordSteamSyncCustomPrefixV1';
     const MANAGED_PREFIXES_KEY = 'discordSteamSyncManagedPrefixesV1';
+    const MANAGED_NICKNAMES_KEY = 'discordSteamSyncManagedNicknamesV1';
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV10';
     const AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY = 'discordSteamSyncAutoSyncPausedAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
@@ -38,7 +39,6 @@
     const POLL_INTERVAL_MS = 15000;
     const FRIEND_COVERAGE_RECHECK_MS = 5 * 60 * 1000;
     const REQUEST_TIMEOUT_MS = 15000;
-    const NICKNAME_VERIFY_DELAY_MS = 1500;
     const STEAM_API_KEY_PATTERN = /^[a-f0-9]{32}$/i;
     const MAX_NICKNAME_LENGTH = 32;
 
@@ -707,23 +707,20 @@
     function setupSteamApiKey() {
         const current = getSteamApiKey();
         const instructions =
-            'STEAM NICKNAME VERIFICATION — API KEY SETUP\n\n' +
-            'WHY THIS IS NEEDED\n' +
-            'Steam can report a nickname update as successful even when it was not saved. This key lets the script retrieve your complete Steam friends list and saved local nickname list so it can verify who should be updated and whether changes were saved.\n\n' +
-            'HOW TO GET YOUR KEY\n' +
-            '1. Open https://steamcommunity.com/dev/apikey in a new tab.\n' +
-            '2. Sign in to the same Steam account you use with this script.\n' +
-            '3. If Steam asks you to register, complete its registration.\n' +
-            '4. Copy the 32-character Web API Key shown by Steam.\n' +
-            '5. Return here, paste the key below, and select OK.\n\n' +
-            'PRIVACY — PLEASE READ\n' +
-            '• The key is saved only in this browser’s Tampermonkey storage.\n' +
-            '• The script sends the key directly to Steam’s official Web API to retrieve your friends list, profile display names, and saved local nickname list.\n' +
-            '• The key is NOT sent to our Discord bot, Railway server, or GitHub.\n' +
-            '• We do not ask for your Steam password, Steam session cookie, or Discord credentials.\n' +
-            '• The key is not needed by the bot and is not shared with other users.\n\n' +
-            'You can remove the saved key at any time with “Remove Steam API Key” in the script. ' +
-            'You need to set it up once for each browser/Tampermonkey installation.\n\n' +
+            'STEAM WEB API KEY SETUP\\n\\n' +
+            'WHY THIS IS NEEDED\\n' +
+            'The key lets the script retrieve your complete Steam friends list and profile names so it can sync local nicknames for linked Gump and Recruit members.\\n\\n' +
+            'HOW TO GET YOUR KEY\\n' +
+            '1. Open https://steamcommunity.com/dev/apikey.\\n' +
+            '2. Sign in to the same Steam account you use with this script.\\n' +
+            '3. Copy the 32-character Web API Key shown by Steam.\\n' +
+            '4. Return here and paste the key below.\\n\\n' +
+            'PRIVACY\\n' +
+            '• The key is saved only in this browser’s Tampermonkey storage.\\n' +
+            '• It is sent directly to Steam’s official Web API for friends and profile information.\\n' +
+            '• It is NOT sent to our Discord bot, Railway, or GitHub.\\n' +
+            '• We do not ask for your Steam password, session cookie, or Discord credentials.\\n\\n' +
+            'Nickname changes are submitted through your signed-in Steam Community session. Independent nickname verification is temporarily disabled.\\n\\n' +
             'Paste your Steam Web API key below:';
         const key = prompt(instructions, current);
         if (key === null) return;
@@ -742,10 +739,7 @@
             setStatus('Could not save the Steam Web API key in Tampermonkey storage.');
             return;
         }
-        setStatus('Steam Web API key saved locally. Testing direct access to Steam…');
-        getSteamNicknameList()
-            .then(() => setStatus('Steam API access is ready. Your key remains stored locally. Your Friends List must be Public for complete syncing.'))
-            .catch(error => setStatus(error.message || 'Steam nickname verification test failed.'));
+        setStatus('Steam Web API key saved locally. You are ready to sync nicknames.');
     }
 
     function removeSteamApiKey() {
@@ -762,64 +756,14 @@
         }
     }
 
-    function getAccountIdFromSteamId(steamId) {
+    function readManagedNicknames() {
         try {
-            return (BigInt(steamId) - 76561197960265728n).toString();
+            const raw = readStoredValue(MANAGED_NICKNAMES_KEY, '{}');
+            const parsed = JSON.parse(raw || '{}');
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
         } catch {
-            return '';
+            return {};
         }
-    }
-
-    async function getSteamNicknameList() {
-        const apiKey = getSteamApiKey();
-        if (!apiKey) throw new Error('Steam nickname verification is not configured. Select “Set Steam API Key” and add your key from https://steamcommunity.com/dev/apikey.');
-        return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `https://api.steampowered.com/IPlayerService/GetNicknameList/v1/?key=${encodeURIComponent(apiKey)}`,
-                timeout: REQUEST_TIMEOUT_MS,
-                headers: { Accept: 'application/json' },
-                onload: response => {
-                    if (response.status < 200 || response.status >= 300) {
-                        reject(new Error(`Steam nickname verification request failed (HTTP ${response.status}).`));
-                        return;
-                    }
-                    let payload;
-                    try {
-                        payload = JSON.parse(String(response.responseText || '{}'));
-                    } catch {
-                        reject(new Error('Steam nickname verification returned invalid JSON.'));
-                        return;
-                    }
-                    const responseData = payload?.response;
-                    const nicknames = responseData?.nicknames ?? payload?.nicknames;
-                    if (Array.isArray(nicknames)) {
-                        resolve(nicknames);
-                        return;
-                    }
-                    // Steam may omit an empty repeated protobuf field entirely.
-                    // An explicit response object with no error therefore means
-                    // an empty nickname list, not a malformed response.
-                    if (responseData && typeof responseData === 'object' && !Array.isArray(responseData) && !payload?.error) {
-                        resolve([]);
-                        return;
-                    }
-                    reject(new Error(payload?.error || 'Steam did not return a readable nickname list. Verification is unavailable.'));
-                },
-                onerror: () => reject(new Error('Could not contact Steam to verify the nickname list.')),
-                ontimeout: () => reject(new Error('Steam nickname verification timed out.'))
-            });
-        });
-    }
-
-    function getSavedNicknameForSteamId(nicknames, steamId) {
-        const accountId = getAccountIdFromSteamId(steamId);
-        if (!accountId) return '';
-        const entry = nicknames.find(item =>
-            String(item?.accountid ?? item?.account_id ?? '') === accountId ||
-            String(item?.steamid ?? '') === steamId
-        );
-        return trimNickname(entry?.nickname || '');
     }
 
     function hasManagedRolePrefix(nickname) {
@@ -828,22 +772,6 @@
             const normalized = prefix.toLowerCase();
             return normalized && value.startsWith(normalized + ' ');
         });
-    }
-
-    function getNicknameEntry(nicknames, steamId) {
-        const accountId = getAccountIdFromSteamId(steamId);
-        if (!accountId || !Array.isArray(nicknames)) return null;
-        return nicknames.find(item =>
-            String(item?.accountid ?? item?.account_id ?? '') === accountId ||
-            String(item?.steamid ?? '') === steamId
-        ) || null;
-    }
-
-    function nicknameMatches(nicknames, steamId, expectedNickname) {
-        const entry = getNicknameEntry(nicknames, steamId);
-        const actual = trimNickname(entry?.nickname || '');
-        const expected = trimNickname(expectedNickname);
-        return expected ? Boolean(entry) && actual === expected : !entry || actual === '';
     }
 
     async function postSteamNickname(steamId, nickname) {
@@ -871,74 +799,35 @@
         });
     }
 
-    async function applyAndVerifyNicknameBatch(changes, progressLabel) {
+    async function applyNicknameBatch(changes, progressLabel) {
         const seenIds = new Set();
         for (const change of changes) {
-            if (!/^\d{17}$/.test(String(change?.steamId || '')) || seenIds.has(change.steamId)) {
+            if (!/^\\d{17}$/.test(String(change?.steamId || '')) || seenIds.has(change.steamId)) {
                 throw new Error('Nickname batch contains an invalid or duplicate SteamID. No nickname changes were submitted.');
             }
             seenIds.add(change.steamId);
             change.nickname = trimNickname(change.nickname);
         }
-        const attempted = [];
-        const requestErrors = new Map();
+
+        const accepted = [];
+        const failed = [];
         let processed = 0;
         for (const change of changes) {
             if (stopRequested) throw new Error('Sync stopped.');
             setStatus(progressLabel, `Submitting ${++processed} / ${changes.length}`);
-            attempted.push(change);
-            try { await postSteamNickname(change.steamId, change.nickname); }
-            catch (error) { requestErrors.set(change.steamId, error?.message || 'Steam rejected the nickname update.'); }
-            await sleep(500);
-        }
-        if (!attempted.length) return { verified: [], failed: [] };
-
-        let firstSnapshot;
-        try {
-            setStatus('Verifying saved Steam nicknames…', `Checking ${attempted.length} changes in one request`);
-            firstSnapshot = await getSteamNicknameList();
-        } catch (error) {
-            return { verified: [], failed: attempted.map(change => ({
-                steamId: change.steamId,
-                message: 'Verification unavailable: ' + (error?.message || 'Could not retrieve Steam nickname list.')
-            })) };
-        }
-
-        const initiallyMatched = attempted.filter(change => nicknameMatches(firstSnapshot, change.steamId, change.nickname));
-        let mismatches = attempted.filter(change => !nicknameMatches(firstSnapshot, change.steamId, change.nickname));
-        let retryVerified = [];
-        if (mismatches.length) {
-            await sleep(NICKNAME_VERIFY_DELAY_MS);
-            for (const change of mismatches) {
-                if (stopRequested) throw new Error('Sync stopped.');
-                try { await postSteamNickname(change.steamId, change.nickname); }
-                catch (error) { requestErrors.set(change.steamId, error?.message || 'Steam rejected the retry.'); }
-                await sleep(500);
-            }
-            let finalSnapshot;
             try {
-                setStatus('Rechecking nickname changes…', `Checking ${mismatches.length} retried changes`);
-                finalSnapshot = await getSteamNicknameList();
+                await postSteamNickname(change.steamId, change.nickname);
+                accepted.push(change);
             } catch (error) {
-                return {
-                    verified: initiallyMatched,
-                    failed: mismatches.map(change => ({
-                        steamId: change.steamId,
-                        message: 'Final verification unavailable: ' + (error?.message || 'Could not retrieve Steam nickname list.')
-                    }))
-                };
+                failed.push({
+                    steamId: change.steamId,
+                    message: error?.message || 'Steam did not accept the nickname update.'
+                });
+                console.warn('[Discord Steam Sync] Steam nickname update failed:', change.steamId, error?.message || error);
             }
-            retryVerified = mismatches.filter(change => nicknameMatches(finalSnapshot, change.steamId, change.nickname));
-            mismatches = mismatches.filter(change => !nicknameMatches(finalSnapshot, change.steamId, change.nickname));
+            await sleep(350);
         }
-        const failed = mismatches.map(change => ({
-            steamId: change.steamId,
-            message: requestErrors.get(change.steamId) ||
-                (change.nickname ? 'Steam did not save the expected nickname.' : 'Steam did not confirm removal of the local nickname.')
-        }));
-        const failedIds = new Set(failed.map(item => item.steamId));
-        const verifiedIds = new Set([...initiallyMatched, ...retryVerified].map(change => change.steamId));
-        return { verified: attempted.filter(change => verifiedIds.has(change.steamId) && !failedIds.has(change.steamId)), failed };
+        return { accepted, failed };
     }
 
     function friendCoverageSignature(states, friends) {
@@ -977,85 +866,78 @@
         }
         if (!getToken()) { setStatus('No sync token configured.'); return; }
         if (!isFriendsPage()) { setStatus('Open Steam → Friends to run nickname sync.'); return; }
+        if (!getSteamApiKey()) { setStatus('Select “Set Steam API Key” and add your Steam Web API key before syncing.'); return; }
         if (force) removeStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY);
-        syncRunning = true; stopRequested = false; setButtonDisabled(true);
-        let verifiedPrefixes = 0, verifiedRemovals = 0, failed = 0;
+
+        syncRunning = true;
+        stopRequested = false;
+        setButtonDisabled(true);
+        let acceptedPrefixes = 0, acceptedRemovals = 0, failed = 0;
         let notFriends = 0, requestsSent = 0, requestPending = 0, requestCooldown = 0, requestFailed = 0;
         try {
             setStatus('Loading Discord sync data…');
-            console.log('[Discord Steam Sync] Step 1: requesting Discord/Railway sync data.');
             const data = await apiRequest('GET', SYNC_API_URL + '/client/all-state');
-            console.log('[Discord Steam Sync] Step 1 complete: Discord/Railway sync data received.', {
-                ok: data?.ok,
-                complete: data?.complete,
-                states: Array.isArray(data?.states) ? data.states.length : null,
-                memberCount: data?.memberCount,
-                fetchedMemberCount: data?.fetchedMemberCount,
-                steamIdPresent: Boolean(data?.steamId)
-            });
-            if (!getSteamApiKey()) throw new Error('Before syncing, select “Set Steam API Key” and add your key from https://steamcommunity.com/dev/apikey. Steam requires an API key to retrieve the saved local nickname list for verification.');
+            if (!getSteamApiKey()) throw new Error('Steam Web API key is missing.');
             const currentSteamId = getSteamId();
             if (!currentSteamId || data.steamId !== currentSteamId) throw new Error('This sync token is not for the Steam account currently signed in.');
             if (data.ok !== true || data.complete !== true || !Array.isArray(data.states)) throw new Error('Sync data is incomplete. No nicknames were changed.');
+
             const memberCount = Number(data.memberCount), fetchedMemberCount = Number(data.fetchedMemberCount);
             if (!Number.isFinite(memberCount) || !Number.isFinite(fetchedMemberCount) || memberCount < 0 || fetchedMemberCount < memberCount) {
                 throw new Error('Discord member data is incomplete or its coverage counts are invalid. No nicknames were changed.');
             }
+
             const signature = stateSignature(data.states);
             const previous = String(readStoredValue(LAST_COMPLETED_SIGNATURE_KEY, '') || '');
-            const needsCheck = force || signature !== previous.split('\n#coverage:')[0] || Date.now() - lastFriendCoverageCheckAt >= FRIEND_COVERAGE_RECHECK_MS;
+            const needsCheck = force || signature !== previous.split('\\n#coverage:')[0] || Date.now() - lastFriendCoverageCheckAt >= FRIEND_COVERAGE_RECHECK_MS;
             if (!needsCheck) { setStatus('Already synchronized.'); return; }
 
-            console.log('[Discord Steam Sync] Step 2: retrieving complete Steam friends list.');
+            setStatus('Retrieving your complete Steam friends list…');
             const friends = await scanFriends();
-            console.log('[Discord Steam Sync] Step 2 complete: Steam friends list verified.', { friendCount: friends.size });
-            console.log('[Discord Steam Sync] Step 3: retrieving saved Steam nickname list.');
-            const savedNicknames = await getSteamNicknameList();
-            console.log('[Discord Steam Sync] Step 3 complete: saved nickname list received.', { nicknameCount: savedNicknames.length });
-            if (!Array.isArray(savedNicknames)) throw new Error('Steam did not return a readable saved nickname list. No nickname changes were made.');
+            lastFriendCoverageCheckAt = Date.now();
+
             const coverage = friendCoverageSignature(data.states, friends);
             const stateById = new Map();
             for (const state of data.states) {
                 const id = getStateSteamId(state);
                 if (id && getStateNickname(state)) stateById.set(id, state);
             }
-            const desired = new Map(), clearStates = new Map();
+
+            const desired = new Map();
             for (const [id, state] of stateById) {
                 if (id === currentSteamId) continue;
                 const role = String(state.role || '').trim();
                 if (role === 'Gump' || role === 'Recruit') desired.set(id, state);
-                else {
-                    const savedNickname = getSavedNicknameForSteamId(savedNicknames, id);
-                    if (savedNickname && hasManagedRolePrefix(savedNickname)) clearStates.set(id, state);
+            }
+
+            // Track only nicknames this browser has successfully submitted. This lets
+            // later syncs remove a managed prefix when a member loses their role.
+            const managed = readManagedNicknames();
+            const changes = [];
+            for (const [steamId, state] of desired) {
+                if (!friends.has(steamId)) continue;
+                const nickname = buildSteamNickname(state, friends.get(steamId));
+                if (String(managed[steamId] || '') !== nickname) {
+                    changes.push({ steamId, nickname, type: 'prefix' });
                 }
             }
-            console.log('[Discord Steam Sync] Building expected nickname changes.', {
-                linkedStates: stateById.size,
-                desiredRoleChanges: desired.size,
-                clearCandidates: clearStates.size
-            });
-            const expectedChanges = [
-                ...[...desired.entries()].filter(([id]) => friends.has(id)).map(([steamId, state]) => ({
-                    steamId, nickname: buildSteamNickname(state, friends.get(steamId)), type: 'prefix'
-                })),
-                ...[...clearStates.entries()].filter(([id]) => friends.has(id)).map(([steamId]) => {
-                    const name = getSteamDisplayName(friends.get(steamId));
-                    if (!name) throw new Error('Could not read a Steam display name for one of the friends being cleared.');
-                    return { steamId, nickname: name, type: 'removal' };
-                })
-            ].sort((a, b) => a.steamId.localeCompare(b.steamId));
+            for (const steamId of Object.keys(managed)) {
+                if (desired.has(steamId) || steamId === currentSteamId) continue;
+                if (!friends.has(steamId)) continue;
+                const personaName = getSteamDisplayName(friends.get(steamId));
+                if (!personaName) continue;
+                changes.push({ steamId, nickname: personaName, type: 'removal' });
+            }
+            changes.sort((a, b) => a.steamId.localeCompare(b.steamId));
 
-            const expected = JSON.stringify(expectedChanges.map(change => [change.steamId, change.type, change.nickname]));
-            const completionSignature = signature + '\n#coverage:' + coverage + '\n#nicknames:' + expected;
-            const needsNicknameChanges = expectedChanges.some(change =>
-                getSavedNicknameForSteamId(savedNicknames, change.steamId) !== change.nickname
-            );
-            if (!force && completionSignature === previous && !needsNicknameChanges) {
+            const expected = JSON.stringify(changes.map(change => [change.steamId, change.type, change.nickname]));
+            const completionSignature = signature + '\\n#coverage:' + coverage + '\\n#changes:' + expected;
+            if (!force && completionSignature === previous && changes.length === 0) {
                 setStatus('Already synchronized.');
                 return;
             }
 
-            notFriends = [...desired.keys(), ...clearStates.keys()].filter(id => !friends.has(id)).length;
+            notFriends = [...desired.keys()].filter(id => !friends.has(id)).length;
             for (const [id] of desired) {
                 if (friends.has(id)) continue;
                 if (stopRequested) throw new Error('Sync stopped.');
@@ -1068,61 +950,49 @@
                     requestFailed++;
                     console.warn('[Discord Steam Sync] Friend request failed:', id, error?.message || error);
                 }
-                await sleep(500);
+                await sleep(350);
             }
 
-            const changes = expectedChanges;
-            console.log('[Discord Steam Sync] Step 4: applying nickname changes.', { changeCount: changes.length });
-            const result = await applyAndVerifyNicknameBatch(changes, 'Applying Discord role prefixes and removals…');
-            console.log('[Discord Steam Sync] Step 4 complete: nickname changes processed.', {
-                verified: result.verified.length,
-                failed: result.failed.length
+            console.log('[Discord Steam Sync] Submitting nickname changes without independent read-back verification.', {
+                changeCount: changes.length
             });
-            verifiedPrefixes = result.verified.filter(item => item.type === 'prefix').length;
-            verifiedRemovals = result.verified.filter(item => item.type === 'removal').length;
-            failed = result.failed.length;
-            for (const item of result.failed) {
-                console.warn('[Discord Steam Sync] Nickname change not verified:', item.steamId, item.message);
+            const result = await applyNicknameBatch(changes, 'Updating Steam local nicknames…');
+            for (const item of result.accepted) {
+                if (item.type === 'removal') {
+                    delete managed[item.steamId];
+                    acceptedRemovals++;
+                } else {
+                    managed[item.steamId] = item.nickname;
+                    acceptedPrefixes++;
+                }
             }
-            if (failed === 0 && notFriends === 0 && requestFailed === 0) writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, completionSignature);
-            else removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
-            const verified = verifiedPrefixes + verifiedRemovals;
+            writeStoredValue(MANAGED_NICKNAMES_KEY, JSON.stringify(managed));
+            failed = result.failed.length;
+            if (failed === 0 && notFriends === 0 && requestFailed === 0) {
+                writeStoredValue(LAST_COMPLETED_SIGNATURE_KEY, signature + '\\n#coverage:' + coverage);
+            } else {
+                removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
+            }
+
             const needsAttention = failed > 0 || notFriends > 0 || requestFailed > 0;
-            setStatus(needsAttention ? 'Sync finished with items needing attention.' : 'All eligible nickname changes verified.',
-                verified + ' nickname changes verified (' + verifiedPrefixes + ' prefixes, ' + verifiedRemovals + ' removals); ' + failed + ' failed or unverified; ' + notFriends + ' Discord members are not Steam friends; ' + requestsSent + ' friend requests sent; ' + requestPending + ' already pending; ' + requestCooldown + ' on 24-hour cooldown; ' + requestFailed + ' request failures.');
+            setStatus(
+                needsAttention ? 'Sync finished with items needing attention.' : 'Nickname updates submitted successfully.',
+                acceptedPrefixes + ' prefixes accepted by Steam; ' + acceptedRemovals +
+                ' old prefixes removed; ' + failed + ' update failures; ' + notFriends +
+                ' linked members are not Steam friends; ' + requestsSent + ' friend requests sent; ' +
+                requestPending + ' already pending; ' + requestCooldown + ' on 24-hour cooldown; ' +
+                requestFailed + ' request failures. Nickname changes are not independently verified.'
+            );
         } catch (error) {
             console.error('[Discord Steam Sync] syncNicknames failed.', error);
             setStatus(error.message || 'Sync failed. No nickname changes were confirmed.');
-        }
-        finally {
+        } finally {
             syncRunning = false;
             setButtonDisabled(false);
             console.log('[Discord Steam Sync] syncNicknames finished.', { syncRunning });
         }
     }
-    async function clearAllFriendNicknames() {
-        if (syncRunning) return;
-        if (!isFriendsPage()) { setStatus('Open Steam → Friends first.'); return; }
-        if (!getSteamApiKey()) { setStatus('Set your Steam API key before removing nicknames so each removal can be verified.'); return; }
-        if (!confirm('Remove local nicknames from every friend returned by Steam’s official Friends API? This uses the complete API friend list rather than only friends currently visible on the page. This is an explicit manual action.')) return;
-        syncRunning = true; stopRequested = false; setButtonDisabled(true);
-        try {
-            const currentSteamId = getSteamId();
-            if (!currentSteamId) throw new Error('Could not determine your Steam ID. Open Steam → Friends and try again.');
-            const friends = await scanFriends();
-            friends.delete(currentSteamId);
-            writeStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '1');
-            const changes = [...friends.keys()].map(steamId => ({ steamId, nickname: '', type: 'removal' }));
-            const result = await applyAndVerifyNicknameBatch(changes, 'Removing friend nicknames…');
-            for (const item of result.failed) {
-                console.warn('[Discord Steam Sync] Remove All nickname not verified:', item.steamId, item.message);
-            }
-            removeStoredValue(LAST_COMPLETED_SIGNATURE_KEY);
-            setStatus(result.failed.length ? 'Remove All finished with items needing attention. Automatic sync is paused.' : 'All friend nickname removals verified. Automatic sync is paused.',
-                result.verified.length + ' nickname removals verified; ' + result.failed.length + ' failed or unverified across ' + friends.size + ' Steam friends. Select “Sync All Nicknames” when you want to restore role prefixes.');
-        } catch (error) { setStatus(error.message || 'Could not remove friend nicknames.'); }
-        finally { syncRunning = false; setButtonDisabled(false); }
-    }
+
     function setupCustomPrefix(role) {
         const otherRole = role === 'Gump' ? 'Recruit' : 'Gump';
         const key = role === 'Gump' ? GUMP_CUSTOM_PREFIX_KEY : RECRUIT_CUSTOM_PREFIX_KEY;

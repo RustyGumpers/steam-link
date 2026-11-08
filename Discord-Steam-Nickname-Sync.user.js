@@ -956,6 +956,9 @@
                     'No nickname updates were needed; ' + notFriends + ' linked members are not Steam friends; ' +
                     requestsSent + ' friend requests sent; ' + requestPending + ' already pending; ' +
                     requestCooldown + ' on 24-hour cooldown; ' + requestFailed + ' request failures.');
+                if (requestFailed > 0) {
+                    throw new Error(requestFailed + ' Steam friend requests failed. The automatic sync will retry.');
+                }
                 return;
             }
 
@@ -1076,6 +1079,14 @@
             syncRunning = false;
             setButtonDisabled(false);
         }
+    }
+
+    function runManualSync() {
+        syncNicknames(true).catch(error => {
+            const message = error?.message || 'Nickname sync failed.';
+            setStatus('Manual sync failed.', message);
+            alert('Discord Steam Sync failed.\\n\\n' + message);
+        });
     }
 
     function setupCustomPrefix(role) {
@@ -1220,7 +1231,7 @@
             uiDismissed = true;
             panel.remove();
         });
-        panel.querySelector('#discord-steam-sync-button').addEventListener('click', () => syncNicknames(true));
+        panel.querySelector('#discord-steam-sync-button').addEventListener('click', runManualSync);
         panel.querySelector('#discord-steam-sync-setup').addEventListener('click', setupToken);
         panel.querySelector('#discord-steam-sync-api-key').addEventListener('click', setupSteamApiKey);
         panel.querySelector('#discord-steam-sync-remove-api-key').addEventListener('click', removeSteamApiKey);
@@ -1276,7 +1287,7 @@
             ['Set Steam Web API Key', setupSteamApiKey],
             ['Set Gump Nickname Prefix', () => setupCustomPrefix('Gump')],
             ['Set Recruit Nickname Prefix', () => setupCustomPrefix('Recruit')],
-            ['Sync All Nicknames', () => syncNicknames(true)],
+            ['Sync All Nicknames', runManualSync],
             ['Remove All Friend Nicknames', clearAllFriendNicknames]
         ];
 

@@ -1014,9 +1014,8 @@
             return;
         }
 
-        const friendCount = 'your Steam friends';
         if (!confirm(
-            'Remove all local nicknames from your Steam friends?\\n\\n' +
+            'Remove all local nicknames from your Steam friends?\n\n' +
             'This resets each friend’s local nickname to their normal Steam display name. ' +
             'It does not remove friends or change their public Steam names.'
         )) return;

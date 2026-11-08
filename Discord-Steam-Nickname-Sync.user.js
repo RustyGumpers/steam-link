@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.52
+// @version      11.53
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -36,7 +36,8 @@
     const AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY = 'discordSteamSyncAutoSyncPausedAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-    const POLL_INTERVAL_MS = 15000;
+    const AUTO_SYNC_MAX_ATTEMPTS = 3;
+    const AUTO_SYNC_RETRY_DELAY_MS = 2000;
     const FRIEND_COVERAGE_RECHECK_MS = 5 * 60 * 1000;
     const REQUEST_TIMEOUT_MS = 15000;
     const STEAM_API_KEY_PATTERN = /^[a-f0-9]{32}$/i;
@@ -44,7 +45,6 @@
 
     let stopRequested = false;
     let syncRunning = false;
-    let pollTimer = null;
     let lastFriendCoverageCheckAt = 0;
 
     function readStoredValue(key, fallback = '') {
@@ -989,9 +989,16 @@
                 requestPending + ' already pending; ' + requestCooldown + ' on 24-hour cooldown; ' +
                 requestFailed + ' request failures. Nickname changes are not independently verified.'
             );
+            if (failed > 0 || requestFailed > 0) {
+                throw new Error(
+                    failed + ' nickname updates and ' + requestFailed +
+                    ' friend requests failed. The automatic sync will retry.'
+                );
+            }
         } catch (error) {
             console.error('[Discord Steam Sync] syncNicknames failed.', error);
             setStatus(error.message || 'Sync failed. No nickname changes were confirmed.');
+            throw error;
         } finally {
             syncRunning = false;
             setButtonDisabled(false);
@@ -1263,15 +1270,6 @@
         uiObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
 
-    function startPolling() {
-        clearInterval(pollTimer);
-        pollTimer = setInterval(() => {
-            if (document.hidden || !getToken() || !isFriendsPage() || syncRunning) return;
-            if (String(readStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY, '') || '') === '1') return;
-            syncNicknames(false).catch(() => {});
-        }, POLL_INTERVAL_MS);
-    }
-
     function registerMenuCommands() {
         const commands = [
             ['Set Discord Steam Sync Token', setupToken],
@@ -1294,7 +1292,6 @@
     migrateLegacyPrefix();
     registerMenuCommands();
     startUIObserver();
-    startPolling();
 
     setTimeout(() => {
         if (!getToken() || !isFriendsPage()) return;
@@ -1302,6 +1299,43 @@
             setStatus('Automatic sync is paused after Remove All. Select “Sync All Nicknames” to resume.');
             return;
         }
-        syncNicknames(false).catch(() => {});
+        (async () => {
+            let lastError = null;
+            for (let attempt = 1; attempt <= AUTO_SYNC_MAX_ATTEMPTS; attempt++) {
+                try {
+                    setStatus(
+                        attempt === 1 ? 'Connecting and syncing…' : 'Sync attempt ' + attempt + ' of ' + AUTO_SYNC_MAX_ATTEMPTS + '…'
+                    );
+                    await syncNicknames(false);
+                    return;
+                } catch (error) {
+                    lastError = error;
+                    console.warn('[Discord Steam Sync] Automatic sync attempt failed.', {
+                        attempt,
+                        maxAttempts: AUTO_SYNC_MAX_ATTEMPTS,
+                        message: error?.message || String(error)
+                    });
+                    if (attempt < AUTO_SYNC_MAX_ATTEMPTS) {
+                        setStatus(
+                            'Sync attempt ' + attempt + ' failed. Retrying…',
+                            'Attempt ' + (attempt + 1) + ' of ' + AUTO_SYNC_MAX_ATTEMPTS
+                        );
+                        await sleep(AUTO_SYNC_RETRY_DELAY_MS);
+                    }
+                }
+            }
+
+            const message =
+                'Discord Steam Sync could not complete after ' + AUTO_SYNC_MAX_ATTEMPTS + ' attempts.\n\n' +
+                (lastError?.message || 'An unknown error occurred.') +
+                '\n\nNo more automatic attempts will run on this page. You can try again with “Sync All Nicknames”.';
+            setStatus('Automatic sync failed after ' + AUTO_SYNC_MAX_ATTEMPTS + ' attempts.', message);
+            alert(message);
+        })().catch(error => {
+            console.error('[Discord Steam Sync] Automatic sync handler failed unexpectedly.', error);
+            const message = error?.message || 'An unexpected automatic sync error occurred.';
+            setStatus('Automatic sync failed.', message);
+            alert('Discord Steam Sync failed.\n\n' + message);
+        });
     }, 2500);
 })();

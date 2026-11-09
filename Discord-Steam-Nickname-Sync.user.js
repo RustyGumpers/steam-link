@@ -955,7 +955,7 @@
                 setStatus(notFriends > 0 || requestFailed > 0 ? 'Sync finished with items needing attention.' : 'Already up to date.',
                     'No nickname updates were needed; ' + notFriends + ' linked members are not Steam friends; ' +
                     requestsSent + ' friend requests sent; ' + requestPending + ' already pending; ' +
-                    requestCooldown + ' on 24-hour cooldown; ' + requestFailed + ' request failures.');
+                    requestCooldown + ' on 24-hour friend request cooldown; ' + requestFailed + ' request failures.');
                 if (requestFailed > 0) {
                     throw new Error(requestFailed + ' Steam friend requests failed. The automatic sync will retry.');
                 }
@@ -989,7 +989,7 @@
                 acceptedPrefixes + ' prefixes accepted by Steam; ' + acceptedRemovals +
                 ' old prefixes removed; ' + failed + ' update failures; ' + notFriends +
                 ' linked members are not Steam friends; ' + requestsSent + ' friend requests sent; ' +
-                requestPending + ' already pending; ' + requestCooldown + ' on 24-hour cooldown; ' +
+                requestPending + ' already pending; ' + requestCooldown + ' on 24-hour friend request cooldown; ' +
                 requestFailed + ' request failures. Nickname changes are not independently verified.'
             );
             if (failed > 0 || requestFailed > 0) {

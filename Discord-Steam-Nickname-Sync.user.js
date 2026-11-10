@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.54
+// @version      11.55
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -35,8 +35,10 @@
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV10';
     const AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY = 'discordSteamSyncAutoSyncPausedAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
-    const SYNC_LOCK_KEY = 'discordSteamSyncActiveLockV1';
-    const SYNC_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
+    const SYNC_LOCK_KEY = 'discordSteamSyncActiveLockV2';
+    const SYNC_LOCK_NAME = 'discord-steam-nickname-sync-v1';
+    const SYNC_LOCK_TIMEOUT_MS = 90 * 1000;
+    const SYNC_LOCK_REFRESH_INTERVAL_MS = 20 * 1000;
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
     const AUTO_SYNC_MAX_ATTEMPTS = 3;
     const AUTO_SYNC_RETRY_DELAY_MS = 2000;
@@ -286,31 +288,118 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    function acquireSyncLock() {
+    // Web Locks provides an actual cross-tab exclusive lock on supported browsers.
+    // Tampermonkey storage is retained as a lease-based fallback.
+    const syncInstanceId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    let syncLockOwner = null;
+    let syncLockRefreshTimer = null;
+    let browserLockRelease = null;
+
+    async function acquireSyncLock() {
+        if (typeof navigator !== 'undefined' && navigator.locks &&
+            typeof navigator.locks.request === 'function') {
+            let settled = false;
+            let resolveAcquired;
+            const acquired = new Promise(resolve => { resolveAcquired = resolve; });
+            let releaseHold;
+            const holdLock = new Promise(resolve => { releaseHold = resolve; });
+
+            navigator.locks.request(SYNC_LOCK_NAME, { ifAvailable: true }, async lock => {
+                if (!lock) {
+                    if (!settled) {
+                        settled = true;
+                        resolveAcquired(false);
+                    }
+                    return;
+                }
+                browserLockRelease = releaseHold;
+                if (!settled) {
+                    settled = true;
+                    resolveAcquired(true);
+                }
+                await holdLock;
+            }).catch(error => {
+                console.warn('[Discord Steam Sync] Browser lock request failed; trying the storage fallback.', error);
+                if (!settled) {
+                    settled = true;
+                    resolveAcquired(null);
+                }
+            });
+
+            const browserResult = await acquired;
+            if (browserResult !== null) return browserResult;
+        }
+
         const now = Date.now();
+        const owner = { owner: syncInstanceId, timestamp: now };
         try {
-            const existing = Number(GM_getValue(SYNC_LOCK_KEY, 0) || 0);
-            if (existing && now - existing < SYNC_LOCK_TIMEOUT_MS) {
+            const raw = GM_getValue(SYNC_LOCK_KEY, '');
+            let existing = null;
+            try { existing = JSON.parse(String(raw || '')); } catch {
+                const legacyTimestamp = Number(raw || 0);
+                if (legacyTimestamp) existing = { owner: 'legacy', timestamp: legacyTimestamp };
+            }
+
+            if (existing?.timestamp && now - Number(existing.timestamp) < SYNC_LOCK_TIMEOUT_MS) {
                 console.warn('[Discord Steam Sync] Sync blocked by another active sync instance.', {
-                    lockAgeMs: now - existing
+                    lockAgeMs: now - Number(existing.timestamp),
+                    owner: existing.owner || 'unknown'
                 });
                 return false;
             }
-            GM_setValue(SYNC_LOCK_KEY, now);
+
+            GM_setValue(SYNC_LOCK_KEY, JSON.stringify(owner));
+            const confirmed = JSON.parse(String(GM_getValue(SYNC_LOCK_KEY, '') || '{}'));
+            if (confirmed.owner !== syncInstanceId) return false;
+
+            syncLockOwner = syncInstanceId;
+            syncLockRefreshTimer = setInterval(refreshSyncLock, SYNC_LOCK_REFRESH_INTERVAL_MS);
             return true;
-        } catch {
-            // If Tampermonkey storage is unavailable, the local syncRunning guard
-            // still protects this script instance.
-            return true;
+        } catch (error) {
+            console.error('[Discord Steam Sync] Could not establish a cross-tab lock.', error);
+            return false;
         }
     }
 
     function refreshSyncLock() {
-        try { GM_setValue(SYNC_LOCK_KEY, Date.now()); } catch {}
+        if (!syncLockOwner) return;
+        try {
+            const current = JSON.parse(String(GM_getValue(SYNC_LOCK_KEY, '') || '{}'));
+            if (current.owner !== syncLockOwner) {
+                console.error('[Discord Steam Sync] Sync lock ownership was lost.');
+                stopRequested = true;
+                return;
+            }
+            GM_setValue(SYNC_LOCK_KEY, JSON.stringify({
+                owner: syncLockOwner,
+                timestamp: Date.now()
+            }));
+        } catch (error) {
+            console.warn('[Discord Steam Sync] Could not refresh the sync lock lease.', error);
+        }
     }
 
     function releaseSyncLock() {
-        try { GM_deleteValue(SYNC_LOCK_KEY); } catch {}
+        if (syncLockRefreshTimer) {
+            clearInterval(syncLockRefreshTimer);
+            syncLockRefreshTimer = null;
+        }
+
+        if (browserLockRelease) {
+            const release = browserLockRelease;
+            browserLockRelease = null;
+            release();
+        }
+
+        if (syncLockOwner) {
+            try {
+                const current = JSON.parse(String(GM_getValue(SYNC_LOCK_KEY, '') || '{}'));
+                if (current.owner === syncLockOwner) GM_deleteValue(SYNC_LOCK_KEY);
+            } catch (error) {
+                console.warn('[Discord Steam Sync] Could not release the sync lock lease.', error);
+            }
+            syncLockOwner = null;
+        }
     }
 
     function apiRequest(method, url, body = null) {
@@ -950,17 +1039,15 @@
             steamId: getSteamId()
         });
         if (syncRunning) {
-            console.warn('[Discord Steam Sync] Sync skipped because another sync is already running.');
-            return;
+            throw new Error('A sync is already running in this script instance. Please wait for it to finish.');
         }
         if (!getToken()) { setStatus('No sync token configured.'); return; }
         if (!isFriendsPage()) { setStatus('Open Steam → Friends to run nickname sync.'); return; }
         if (!getSteamApiKey()) { setStatus('Select “Set Steam API Key” and add your Steam Web API key before syncing.'); return; }
         if (force) removeStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY);
 
-        if (!acquireSyncLock()) {
-            setStatus('A sync is already running in another script instance.', 'This sync was skipped to prevent duplicate Steam requests.');
-            return;
+        if (!(await acquireSyncLock())) {
+            throw new Error('A sync is already running in another Steam tab or script instance. Please wait for it to finish.');
         }
 
         syncRunning = true;
@@ -1126,6 +1213,11 @@
             'It does not remove friends or change their public Steam names.'
         )) return;
 
+        if (!(await acquireSyncLock())) {
+            setStatus('A sync is already running in another Steam tab or script instance.', 'Wait for it to finish before removing nicknames.');
+            return;
+        }
+
         syncRunning = true;
         stopRequested = false;
         setButtonDisabled(true);
@@ -1173,6 +1265,7 @@
             setStatus(error.message || 'Could not remove friend nicknames. Automatic syncing remains paused.');
         } finally {
             syncRunning = false;
+            releaseSyncLock();
             setButtonDisabled(false);
         }
     }

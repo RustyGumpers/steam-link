@@ -2,7 +2,7 @@
 
 // @name         Discord Steam Nickname Sync
 // @namespace    discord-steam-sync
-// @version      11.53
+// @version      11.54
 // @description  Sync Steam friend local nicknames from Discord roles.
 // @homepageURL  https://github.com/RustyGumpers/steam-link
 // @supportURL   https://github.com/RustyGumpers/steam-link/issues
@@ -35,6 +35,8 @@
     const LAST_COMPLETED_SIGNATURE_KEY = 'discordSteamSyncLastCompletedSignatureV10';
     const AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY = 'discordSteamSyncAutoSyncPausedAfterClearV1';
     const FRIEND_REQUESTS_KEY = 'discordSteamSyncFriendRequestsV1';
+    const SYNC_LOCK_KEY = 'discordSteamSyncActiveLockV1';
+    const SYNC_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
     const FRIEND_REQUEST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
     const AUTO_SYNC_MAX_ATTEMPTS = 3;
     const AUTO_SYNC_RETRY_DELAY_MS = 2000;
@@ -282,6 +284,33 @@
 
     function sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function acquireSyncLock() {
+        const now = Date.now();
+        try {
+            const existing = Number(GM_getValue(SYNC_LOCK_KEY, 0) || 0);
+            if (existing && now - existing < SYNC_LOCK_TIMEOUT_MS) {
+                console.warn('[Discord Steam Sync] Sync blocked by another active sync instance.', {
+                    lockAgeMs: now - existing
+                });
+                return false;
+            }
+            GM_setValue(SYNC_LOCK_KEY, now);
+            return true;
+        } catch {
+            // If Tampermonkey storage is unavailable, the local syncRunning guard
+            // still protects this script instance.
+            return true;
+        }
+    }
+
+    function refreshSyncLock() {
+        try { GM_setValue(SYNC_LOCK_KEY, Date.now()); } catch {}
+    }
+
+    function releaseSyncLock() {
+        try { GM_deleteValue(SYNC_LOCK_KEY); } catch {}
     }
 
     function apiRequest(method, url, body = null) {
@@ -645,20 +674,22 @@
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
                 data: `sessionID=${encodeURIComponent(sessionID)}&steamid=${encodeURIComponent(steamId)}&accept_invite=0`,
                 onload: response => {
-                    const text = String(response.responseText || '').toLowerCase();
-                    if (response.status >= 200 && response.status < 300) {
-                        let parsed = null;
-                        try {
-                            parsed = JSON.parse(String(response.responseText || ''));
-                        } catch {}
+                    const details = getSteamMutationResponseDetails(response);
+                    const text = details.responseBody.toLowerCase();
 
-                        // Steam's endpoint normally returns JSON. Treat explicit
-                        // non-success codes as failures instead of assuming that
-                        // any HTTP 200 means the request was accepted.
+                    console.log('[Discord Steam Sync] Steam friend request response.', {
+                        steamId,
+                        status: details.status,
+                        statusText: details.statusText,
+                        responseBody: details.responseBody,
+                        parsed: details.parsed
+                    });
+
+                    if (details.status >= 200 && details.status < 300) {
                         const alreadyPending =
                             /already\s+friends|already\s+sent|pending|duplicate|request\s+(?:already\s+)?sent/.test(text);
 
-                        if (parsed && (parsed.success === true || Number(parsed.success) === 1)) {
+                        if (details.parsed && (details.parsed.success === true || Number(details.parsed.success) === 1)) {
                             state[steamId] = Date.now();
                             writeFriendRequestState(state);
                             return resolve('sent');
@@ -671,15 +702,19 @@
                         }
 
                         if (
-                            !parsed ||
-                            (Object.prototype.hasOwnProperty.call(parsed, 'success')) ||
-                            (parsed.error && String(parsed.error).trim())
+                            !details.parsed ||
+                            Object.prototype.hasOwnProperty.call(details.parsed, 'success') ||
+                            (details.parsed.error && String(details.parsed.error).trim())
                         ) {
-                            reject(new Error(`Steam friend request was rejected for ${steamId}.`));
+                            reject(new Error(
+                                `Steam friend request was rejected for ${steamId}. Response: ${details.responseBody}`
+                            ));
                             return;
                         }
 
-                        reject(new Error(`Steam returned an unrecognized friend-request response for ${steamId}.`));
+                        reject(new Error(
+                            `Steam returned an unrecognized friend-request response for ${steamId}. Response: ${details.responseBody}`
+                        ));
                         return;
                     }
 
@@ -689,10 +724,16 @@
                         return resolve('pending');
                     }
 
-                    reject(new Error(`Steam friend request failed for ${steamId}.`));
+                    reject(new Error(
+                        `Steam friend request failed for ${steamId} (HTTP ${details.status}). Response: ${details.responseBody}`
+                    ));
                 },
-                onerror: () => reject(new Error(`Steam friend request failed for ${steamId}.`)),
-                ontimeout: () => reject(new Error(`Steam friend request timed out for ${steamId}.`))
+                onerror: () => reject(new Error(
+                    `Steam friend request failed for ${steamId} because the browser request failed before Steam returned a response.`
+                )),
+                ontimeout: () => reject(new Error(
+                    `Steam friend request timed out for ${steamId} after ${REQUEST_TIMEOUT_MS} ms.`
+                ))
             });
         });
     }
@@ -774,10 +815,30 @@
         });
     }
 
+    function getSteamMutationResponseDetails(response) {
+        const rawBody = String(response?.responseText || '');
+        const responseBody = rawBody
+            .replace(/<[^>]*>/g, ' ')
+            .replace(/\\s+/g, ' ')
+            .trim()
+            .slice(0, 1000) || '(empty response body)';
+
+        let parsed = null;
+        try { parsed = JSON.parse(rawBody || ''); } catch {}
+
+        return {
+            status: Number(response?.status || 0),
+            statusText: String(response?.statusText || ''),
+            responseBody,
+            parsed
+        };
+    }
+
     async function postSteamNickname(steamId, nickname) {
         const sessionID = getSessionId();
         if (!sessionID) throw new Error('Steam session ID was not found.');
         const expectedNickname = trimNickname(nickname);
+
         await new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
@@ -786,15 +847,43 @@
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
                 data: `nickname=${encodeURIComponent(expectedNickname)}&sessionid=${encodeURIComponent(sessionID)}`,
                 onload: response => {
-                    if (response.status < 200 || response.status >= 300) return reject(new Error(`Steam nickname update failed for ${steamId} (HTTP ${response.status}).`));
-                    let data;
-                    try { data = JSON.parse(String(response.responseText || '{}')); }
-                    catch { return reject(new Error(`Steam nickname update returned invalid data for ${steamId}.`)); }
-                    if (Number(data?.success) !== 1) return reject(new Error(`Steam nickname update failed for ${steamId}.`));
+                    const details = getSteamMutationResponseDetails(response);
+
+                    console.log('[Discord Steam Sync] Steam nickname update response.', {
+                        steamId,
+                        status: details.status,
+                        statusText: details.statusText,
+                        responseBody: details.responseBody,
+                        parsed: details.parsed
+                    });
+
+                    if (details.status < 200 || details.status >= 300) {
+                        return reject(new Error(
+                            `Steam nickname update failed for ${steamId} (HTTP ${details.status}). Response: ${details.responseBody}`
+                        ));
+                    }
+
+                    if (!details.parsed) {
+                        return reject(new Error(
+                            `Steam nickname update returned invalid data for ${steamId}. Response: ${details.responseBody}`
+                        ));
+                    }
+
+                    const success = details.parsed?.success === true || Number(details.parsed?.success) === 1;
+                    if (!success) {
+                        return reject(new Error(
+                            `Steam nickname update was rejected for ${steamId}. Response: ${details.responseBody}`
+                        ));
+                    }
+
                     resolve();
                 },
-                onerror: () => reject(new Error(`Steam nickname update failed for ${steamId}.`)),
-                ontimeout: () => reject(new Error(`Steam nickname update timed out for ${steamId}.`))
+                onerror: () => reject(new Error(
+                    `Steam nickname update failed for ${steamId} because the browser request failed before Steam returned a response.`
+                )),
+                ontimeout: () => reject(new Error(
+                    `Steam nickname update timed out for ${steamId} after ${REQUEST_TIMEOUT_MS} ms.`
+                ))
             });
         });
     }
@@ -868,6 +957,11 @@
         if (!isFriendsPage()) { setStatus('Open Steam → Friends to run nickname sync.'); return; }
         if (!getSteamApiKey()) { setStatus('Select “Set Steam API Key” and add your Steam Web API key before syncing.'); return; }
         if (force) removeStoredValue(AUTO_SYNC_PAUSED_AFTER_CLEAR_KEY);
+
+        if (!acquireSyncLock()) {
+            setStatus('A sync is already running in another script instance.', 'This sync was skipped to prevent duplicate Steam requests.');
+            return;
+        }
 
         syncRunning = true;
         stopRequested = false;
@@ -957,7 +1051,7 @@
                     requestsSent + ' friend requests sent; ' + requestPending + ' already pending; ' +
                     requestCooldown + ' on 24-hour friend request cooldown; ' + requestFailed + ' request failures.');
                 if (requestFailed > 0) {
-                    throw new Error(requestFailed + ' Steam friend requests failed. The automatic sync will retry.');
+                    throw new Error(requestFailed + ' Steam friend requests failed.');
                 }
                 return;
             }
@@ -965,6 +1059,7 @@
             console.log('[Discord Steam Sync] Submitting nickname changes without independent read-back verification.', {
                 changeCount: changes.length
             });
+            refreshSyncLock();
             const result = await applyNicknameBatch(changes, 'Updating Steam local nicknames…');
             for (const item of result.accepted) {
                 if (item.type === 'removal') {
@@ -995,7 +1090,7 @@
             if (failed > 0 || requestFailed > 0) {
                 throw new Error(
                     failed + ' nickname updates and ' + requestFailed +
-                    ' friend requests failed. The automatic sync will retry.'
+                    ' friend requests failed.'
                 );
             }
         } catch (error) {
@@ -1004,6 +1099,7 @@
             throw error;
         } finally {
             syncRunning = false;
+            releaseSyncLock();
             setButtonDisabled(false);
             console.log('[Discord Steam Sync] syncNicknames finished.', { syncRunning });
         }
@@ -1331,6 +1427,12 @@
                             'Sync attempt ' + attempt + ' failed. Retrying…',
                             'Attempt ' + (attempt + 1) + ' of ' + AUTO_SYNC_MAX_ATTEMPTS
                         );
+                        console.log('[Discord Steam Sync] Automatic retry scheduled.', {
+                            failedAttempt: attempt,
+                            nextAttempt: attempt + 1,
+                            maxAttempts: AUTO_SYNC_MAX_ATTEMPTS,
+                            force: false
+                        });
                         await sleep(AUTO_SYNC_RETRY_DELAY_MS);
                     }
                 }
